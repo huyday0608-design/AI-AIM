@@ -18,6 +18,9 @@ class HardwareProfileManager:
         self.device_name = "CPU"
         self.vram_total_mb = 0.0
         self.is_rtx_2050 = False
+        self.idle_sleep_ms = 10
+        self.max_queue_age_ms = 40
+        self.box_history_timeout_s = 0.40
         self._init_device_specs()
 
     def _init_device_specs(self):
@@ -47,6 +50,8 @@ class HardwareProfileManager:
             cfg.mouse_deadzone = 1.2
             cfg.mouse_max_step = 20
             self.idle_sleep_ms = 10
+            self.max_queue_age_ms = 40
+            self.box_history_timeout_s = 0.40
         elif mode == self.BALANCED:
             # Cân bằng hoàn hảo giữa thông lượng và độ mượt, phản hồi ~16ms
             cfg.ai_model_name = "sunxds_0.8.0.onnx"
@@ -57,6 +62,8 @@ class HardwareProfileManager:
             cfg.mouse_deadzone = 1.2
             cfg.mouse_max_step = 25
             self.idle_sleep_ms = 4
+            self.max_queue_age_ms = 30
+            self.box_history_timeout_s = 0.35
         elif mode == self.PERFORMANCE:
             # Tối đa hóa tốc độ xử lý khi CPU/GPU còn dư dả tài nguyên
             cfg.ai_model_name = "sunxds_0.8.0.onnx"
@@ -67,6 +74,8 @@ class HardwareProfileManager:
             cfg.mouse_deadzone = 1.0
             cfg.mouse_max_step = 30
             self.idle_sleep_ms = 0
+            self.max_queue_age_ms = 20
+            self.box_history_timeout_s = 0.25
 
         if verbose:
             logger.info(f"[HardwareProfile] Switched to mode: {self.current_profile} (Target FPS: {cfg.capture_fps}, MaxStep: {cfg.mouse_max_step}, Conf: {cfg.AI_conf})")
