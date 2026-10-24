@@ -34,7 +34,7 @@ class Target:
             self.y = float(aim_y)
         else:
             self.x = float(x)
-            self.y = float(y) if is_head_class(self.cls) else float(y - cfg.body_y_offset * self.h)
+            self.y = float(y - 0.15 * self.h) if is_head_class(self.cls) else float(y - cfg.body_y_offset * self.h)
 
 
 class LockedZombieTrack:
@@ -365,9 +365,11 @@ class FrameParser:
 
             if matched_head is not None:
                 hx, hy, hw, hh = matched_head['box']
+                # Pinpoint Headshot: Aim directly at the forehead / eye line (15% above center)
+                head_aim_y = float(hy - 0.15 * hh)
                 targets.append({
                     'aim_x': float(hx),
-                    'aim_y': float(hy),
+                    'aim_y': head_aim_y,
                     'box_x': float(bx),
                     'box_y': float(by),
                     'box_w': float(bw),
@@ -377,7 +379,8 @@ class FrameParser:
                     'track_id': b['tid'] or matched_head['tid']
                 })
             else:
-                aim_y = float(by) if cfg.disable_headshot else float(by - cfg.body_y_offset * bh)
+                body_offset = 0.42 if not cfg.disable_headshot else cfg.body_y_offset
+                aim_y = float(by - body_offset * bh)
                 targets.append({
                     'aim_x': float(bx),
                     'aim_y': aim_y,
@@ -411,9 +414,10 @@ class FrameParser:
                     if hy > 0.68 * win_h and hx > 0.32 * win_w:
                         continue
 
+                    head_aim_y = float(hy - 0.15 * hh)
                     targets.append({
                         'aim_x': float(hx),
-                        'aim_y': float(hy),
+                        'aim_y': head_aim_y,
                         'box_x': float(hx),
                         'box_y': float(hy),
                         'box_w': float(hw),

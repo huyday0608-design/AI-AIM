@@ -182,15 +182,6 @@ class MouseThread:
         effective_x = target_x
         effective_y = target_y
 
-        # Multi-Point Dynamic Hit Surface Optimization:
-        # Khi ở chế độ súng ngắm (Sniper Mode): Khóa chết 100% vào hộp sọ / mắt (Pinpoint Headshot Lock).
-        # Tuyệt đối KHÔNG hạ điểm ngắm xuống ngực hay cổ kể cả khi zombie chạy nhanh, đảm bảo 1-hit kill!
-        if not getattr(cfg, 'weapon_is_sniper', False):
-            if abs(vel_x) > 80.0 and target_h > 0 and not is_firing:
-                strafe_intensity = min(1.0, (abs(vel_x) - 80.0) / 120.0)
-                strafe_y_drop = strafe_intensity * (target_h * 0.10)
-                effective_y += strafe_y_drop
-
         if not self.disable_prediction:
             current_time = time.time()
             if not isinstance(data, sv.Detections):
@@ -308,26 +299,8 @@ class MouseThread:
         is_firing = self._update_spray_state()
         is_sniper = getattr(cfg, 'weapon_is_sniper', False)
 
-        # Reverse.AI / Delta Force Progressive Spray Model:
-        # Đường cong ghìm súng 3 pha chuẩn xác cho súng tự động:
-        # (Chế độ súng ngắm bắn từng phát 1-tap: spray_drop = 0 để giữ tâm chính xác 100% trên đầu)
-        spray_drop = 0.0
-        if not is_sniper and is_firing and target_h > 0:
-            if self.spray_time < 0.16:
-                stage_factor = (self.spray_time / 0.16) * 0.30
-            elif self.spray_time < 0.55:
-                p = (self.spray_time - 0.16) / (0.55 - 0.16)
-                stage_factor = 0.30 + 0.55 * (3.0 * p**2 - 2.0 * p**3)
-            else:
-                stage_factor = 0.85 + 0.15 * min(1.0, (self.spray_time - 0.55) / 0.45)
-
-            max_drop = min(target_h * 0.50, cfg.recoil_pitch * 1.6)
-            spray_drop = stage_factor * max_drop
-
-        effective_target_y = target_y + spray_drop
-
         offset_x = target_x - self.center_x
-        offset_y = effective_target_y - self.center_y
+        offset_y = target_y - self.center_y
         distance = math.hypot(offset_x, offset_y)
 
         # Smooth Asymptotic Approach & Anti-Deadzone:
@@ -335,11 +308,10 @@ class MouseThread:
         if distance <= cfg.mouse_deadzone:
             return 0.0, 0.0
 
-        # 2. Khi ở gần tâm (< 18px): Hãm tốc độ mượt mà (smooth cubic ease-out)
-        # Giúp tâm súng lướt êm và dừng nhẹ nhàng ngay trên đầu zombie mà không bị giật lố (overshoot)
-        if distance < 18.0:
-            norm = (distance - cfg.mouse_deadzone) / max(1.0, 18.0 - cfg.mouse_deadzone)
-            smooth_factor = 0.35 + 0.65 * (norm ** 0.85)
+        # 2. Khi ở gần tâm (< 16px): Giảm tốc mượt mà nhưng duy trì lực kéo chắc chắn (>= 0.60) để tâm ăn thẳng vào đầu
+        if distance < 16.0:
+            norm = (distance - cfg.mouse_deadzone) / max(1.0, 16.0 - cfg.mouse_deadzone)
+            smooth_factor = 0.60 + 0.40 * norm
         else:
             smooth_factor = 1.0
 
