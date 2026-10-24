@@ -34,7 +34,9 @@ class Target:
             self.y = float(aim_y)
         else:
             self.x = float(x)
-            self.y = float(y - 0.15 * self.h) if is_head_class(self.cls) else float(y - cfg.body_y_offset * self.h)
+            is_sniper = getattr(cfg, 'weapon_is_sniper', False)
+            body_offset = 0.46 if is_sniper else 0.42
+            self.y = float(y - 0.15 * self.h) if is_head_class(self.cls) else float(y - body_offset * self.h)
 
 
 class LockedZombieTrack:
@@ -85,15 +87,29 @@ class LockedZombieTrack:
         self.box_w = 0.7 * self.box_w + 0.3 * float(box_w)
         self.box_h = 0.7 * self.box_h + 0.3 * float(box_h)
 
-        # Smooth aimpoint with clamp to eliminate vertical head/body alternation jitter:
-        if aim_x is not None and aim_y is not None:
-            clamped_dx = max(-15.0, min(15.0, float(aim_x) - self.aim_x))
-            clamped_dy = max(-15.0, min(15.0, float(aim_y) - self.aim_y))
-            self.aim_x += 0.50 * clamped_dx
-            self.aim_y += 0.50 * clamped_dy
+        # Target aimpoint positioning:
+        is_sniper = getattr(cfg, 'weapon_is_sniper', False)
+        if is_sniper:
+            # Sniper Mode: Khóa tuyệt đối vào điểm đầu (100% Headshot), snap tức thì không delay
+            if aim_x is not None and aim_y is not None:
+                self.aim_x = float(aim_x)
+                self.aim_y = float(aim_y)
+            else:
+                self.aim_x = self.box_x + self.rel_aim_x * self.box_w
+                self.aim_y = self.box_y + self.rel_aim_y * self.box_h
         else:
-            self.aim_x = self.box_x + self.rel_aim_x * self.box_w
-            self.aim_y = self.box_y + self.rel_aim_y * self.box_h
+            # Smooth aimpoint with clamp to eliminate vertical head/body alternation jitter:
+            if aim_x is not None and aim_y is not None:
+                clamped_dx = max(-15.0, min(15.0, float(aim_x) - self.aim_x))
+                clamped_dy = max(-15.0, min(15.0, float(aim_y) - self.aim_y))
+                self.aim_x += 0.50 * clamped_dx
+                self.aim_y += 0.50 * clamped_dy
+            else:
+                self.aim_x = self.box_x + self.rel_aim_x * self.box_w
+                self.aim_y = self.box_y + self.rel_aim_y * self.box_h
+
+        self.rel_aim_x = (self.aim_x - self.box_x) / max(self.box_w, 1.0)
+        self.rel_aim_y = (self.aim_y - self.box_y) / max(self.box_h, 1.0)
 
         if track_id is not None:
             self.track_id = track_id
@@ -354,11 +370,15 @@ class FrameParser:
                 continue
 
             matched_head = None
+            is_sniper = getattr(cfg, 'weapon_is_sniper', False)
             if not cfg.disable_headshot:
+                head_x_dev = 0.75 * bw if is_sniper else 0.60 * bw
+                head_min_y = (by - 0.75 * bh) if is_sniper else (by - 0.60 * bh)
+                head_max_y = (by + 0.20 * bh) if is_sniper else (by + 0.15 * bh)
                 for h_idx, h in enumerate(heads):
                     hx, hy, hw, hh = h['box']
                     # Head lies in the upper section of the body bounding box
-                    if abs(hx - bx) <= 0.60 * bw and (by - 0.60 * bh) <= hy <= (by + 0.15 * bh):
+                    if abs(hx - bx) <= head_x_dev and head_min_y <= hy <= head_max_y:
                         matched_head = h
                         matched_head_indices.add(h_idx)
                         break
@@ -379,7 +399,8 @@ class FrameParser:
                     'track_id': b['tid'] or matched_head['tid']
                 })
             else:
-                body_offset = 0.42 if not cfg.disable_headshot else cfg.body_y_offset
+                # Fallback: khi chỉ phát hiện thân (chưa phát hiện đầu riêng), đưa tâm thẳng lên đỉnh đầu
+                body_offset = 0.47 if is_sniper else (0.42 if not cfg.disable_headshot else cfg.body_y_offset)
                 aim_y = float(by - body_offset * bh)
                 targets.append({
                     'aim_x': float(bx),
@@ -388,7 +409,7 @@ class FrameParser:
                     'box_y': float(by),
                     'box_w': float(bw),
                     'box_h': float(bh),
-                    'cls': b['cls'],
+                    'cls': HEAD_CLASS_ID if is_sniper else b['cls'],
                     'eff_h': float(bh),
                     'track_id': b['tid']
                 })
@@ -396,22 +417,25 @@ class FrameParser:
         # 2. Add legitimate unmatched heads (e.g. enemy behind cover with only head visible)
         # Lọc triệt để đồ vật môi trường (ống nước, đèn trần, van xả, mô hình súng/tay của người chơi):
         if not cfg.disable_headshot:
+            is_sniper = getattr(cfg, 'weapon_is_sniper', False)
             for h_idx, h in enumerate(heads):
                 if h_idx not in matched_head_indices:
                     hx, hy, hw, hh = h['box']
 
-                    # Bộ lọc 1: Hình dạng đầu người luôn có tỷ lệ đứng hoặc vuông (hh >= hw * 0.75).
-                    # Các ống nước nằm ngang, thanh xà, van tường thường có bề ngang dài hơn chiều cao (hw > 1.25 * hh).
-                    if hw > 1.25 * hh:
+                    # Bộ lọc 1: Hình dạng đầu người. Khi zoom kính ngắm Sniper, vạch ngang của tâm ngắm cắt qua đầu tạo thành hộp dẹt
+                    max_ratio = 2.2 if is_sniper else 1.40
+                    if hw > max_ratio * hh:
                         continue
 
-                    # Bộ lọc 2: Kích thước hợp lý. Đầu ở cự ly chiến đấu không thể chiếm quá 25% màn hình FOV.
-                    if hw > 0.22 * win_w or hh > 0.25 * win_h:
+                    # Bộ lọc 2: Kích thước hợp lý. Khi zoom ống ngắm Sniper, đầu có thể chiếm tới 65% màn hình FOV.
+                    max_w = 0.65 * win_w if is_sniper else 0.40 * win_w
+                    max_h = 0.70 * win_h if is_sniper else 0.45 * win_h
+                    if hw > max_w or hh > max_h:
                         continue
 
                     # Bộ lọc 3: Vùng vũ khí của bản thân (Player Weapon Deadzone).
-                    # Súng, laser và tay cầm của nhân vật luôn nằm ở vùng đáy màn hình (hy > 0.68 * win_h và hx > 0.32 * win_w).
-                    if hy > 0.68 * win_h and hx > 0.32 * win_w:
+                    # Trong chế độ súng ngắm (zoom ADS), mô hình súng không che chắn góc màn hình.
+                    if not is_sniper and (hy > 0.68 * win_h and hx > 0.32 * win_w):
                         continue
 
                     head_aim_y = float(hy - 0.15 * hh)

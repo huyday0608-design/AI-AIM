@@ -58,8 +58,13 @@ class PIDController:
 
         raw_output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
 
-        # Critically damped smoothing: loại bỏ triệt để rung lắc do jitter AI, bám dính êm ru vào zombie di chuyển
-        alpha = 0.45
+        # Critically damped smoothing: loại bỏ triệt để rung lắc do jitter AI, bám dính êm ru vào zombie di chuyển.
+        # Ở chế độ Sniper (F7): tăng vọt alpha = 0.92 để flick dứt khoát 1 chạm ăn ngay vào đầu mục tiêu
+        is_sniper = getattr(cfg, 'weapon_is_sniper', False)
+        if is_sniper:
+            alpha = 0.92 if abs(raw_output) > 5.0 else 0.78
+        else:
+            alpha = 0.48
         self.smooth_output = alpha * raw_output + (1.0 - alpha) * self.smooth_output
 
         self.prev_error = error
@@ -322,8 +327,12 @@ class MouseThread:
         scale_x = (degrees_per_pixel_x / 360.0) * (self.dpi / sensitivity)
         scale_y = (degrees_per_pixel_y / 360.0) * (self.dpi / sensitivity)
 
-        raw_move_x = offset_x * scale_x
-        raw_move_y = offset_y * scale_y
+        # Sniper ADS Boost: Bù trừ hệ số suy giảm độ nhạy game khi zoom kính ngắm (ADS scaling)
+        # Giúp tâm vẩy nhanh và dứt khoát vào đầu thay vì lờ đờ trôi chậm
+        sniper_boost = 1.65 if is_sniper else 1.0
+
+        raw_move_x = offset_x * scale_x * sniper_boost
+        raw_move_y = offset_y * scale_y * sniper_boost
 
         now = time.time()
         move_x = self.pid_x.update(raw_move_x * smooth_factor, current_time=now)
@@ -395,15 +404,19 @@ class MouseThread:
         move_x = int(x)
         move_y = int(y)
 
-        # Max step safety clamp: giới hạn tối đa 25px/khung hình để loại bỏ hoàn toàn giật văng chuột
-        max_step = min(cfg.mouse_max_step, 25) if cfg.mouse_max_step > 0 else 25
+        # Max step safety clamp:
+        # Chế độ thường: giới hạn 25px/khung hình để loại bỏ giật chuột.
+        # Chế độ Sniper: cho phép tới 45px/khung hình để flick tâm tốc độ cao vào đầu
+        is_sniper = getattr(cfg, 'weapon_is_sniper', False)
+        max_step_limit = 45 if is_sniper else 25
+        max_step = min(cfg.mouse_max_step, max_step_limit) if cfg.mouse_max_step > 0 else max_step_limit
         move_x = max(-max_step, min(max_step, move_x))
         move_y = max(-max_step, min(max_step, move_y))
 
         # Slew-rate limiter / max acceleration safety clamp:
         # Prevents violent mouse twitching between consecutive frames
         if hasattr(self, 'last_sent_move_x') and hasattr(self, 'last_sent_move_y'):
-            max_accel = 16
+            max_accel = 35 if is_sniper else 16
             move_x = max(self.last_sent_move_x - max_accel, min(self.last_sent_move_x + max_accel, move_x))
             move_y = max(self.last_sent_move_y - max_accel, min(self.last_sent_move_y + max_accel, move_y))
         self.last_sent_move_x = move_x

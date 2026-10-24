@@ -132,12 +132,29 @@ class WeaponManager:
         cfg.recoil_spray_scale = profile.recoil_spray_scale
         cfg.recoil_max_pitch = profile.recoil_max_pitch
         cfg.weapon_is_sniper = profile.is_sniper
-        cfg.weapon_head_only = profile.head_only
         if profile.is_sniper:
             cfg.disable_headshot = False
-            cfg.body_y_offset = 0.38
+            cfg.body_y_offset = 0.47
+            cfg.AI_conf = 0.10
+            cfg.mouse_pid_kp = 0.85
+            cfg.mouse_max_step = 35
+            try:
+                from logic.mouse import mouse
+                mouse.pid_x.update_constants(0.85, 0.0, 0.0)
+                mouse.pid_y.update_constants(0.85, 0.0, 0.0)
+            except Exception:
+                pass
         else:
-            cfg.body_y_offset = 0.28
+            cfg.body_y_offset = 0.42
+            cfg.AI_conf = 0.11
+            cfg.mouse_pid_kp = 0.50
+            cfg.mouse_max_step = 25
+            try:
+                from logic.mouse import mouse
+                mouse.pid_x.update_constants(0.50, 0.0, 0.0)
+                mouse.pid_y.update_constants(0.50, 0.0, 0.0)
+            except Exception:
+                pass
 
         mode_desc = " [HEADSHOT PRIORITY 100%]" if profile.is_sniper else f" (Pitch: {profile.recoil_pitch}, Scale: {profile.recoil_spray_scale})"
         logger.info(f"[Weapons] Switched to profile: {profile.name}{mode_desc}")

@@ -38,17 +38,18 @@ class HardwareProfileManager:
 
         self.current_profile = mode
 
+        is_sniper = getattr(cfg, 'weapon_is_sniper', False)
         # Empirical tuning based on RTX 2050 benchmark measurements:
         # ONNX Runtime CUDA @ 416x416: 31.27ms (32.0 FPS), 32MB VRAM allocated, 62MB reserved.
         if mode == self.STABLE:
             # Ưu tiên độ ổn định tuyệt đối khi game đang chạy nặng, tiết kiệm pin & nhiệt độ laptop
             cfg.ai_model_name = "sunxds_0.8.0.onnx"
             cfg.ai_model_image_size = 416
-            cfg.AI_conf = 0.14
+            cfg.AI_conf = 0.10 if is_sniper else 0.11
             cfg.capture_fps = 45
-            cfg.mouse_pid_kp = 0.45
-            cfg.mouse_deadzone = 1.2
-            cfg.mouse_max_step = 20
+            cfg.mouse_pid_kp = 0.85 if is_sniper else 0.45
+            cfg.mouse_deadzone = 0.6 if is_sniper else 1.2
+            cfg.mouse_max_step = 35 if is_sniper else 20
             self.idle_sleep_ms = 10
             self.max_queue_age_ms = 40
             self.box_history_timeout_s = 0.40
@@ -56,11 +57,11 @@ class HardwareProfileManager:
             # Cân bằng hoàn hảo giữa thông lượng và độ mượt, phản hồi ~16ms
             cfg.ai_model_name = "sunxds_0.8.0.onnx"
             cfg.ai_model_image_size = 416
-            cfg.AI_conf = 0.14
+            cfg.AI_conf = 0.10 if is_sniper else 0.11
             cfg.capture_fps = 60
-            cfg.mouse_pid_kp = 0.50
-            cfg.mouse_deadzone = 1.2
-            cfg.mouse_max_step = 25
+            cfg.mouse_pid_kp = 0.85 if is_sniper else 0.50
+            cfg.mouse_deadzone = 0.6 if is_sniper else 1.2
+            cfg.mouse_max_step = 35 if is_sniper else 25
             self.idle_sleep_ms = 4
             self.max_queue_age_ms = 30
             self.box_history_timeout_s = 0.35
@@ -68,11 +69,11 @@ class HardwareProfileManager:
             # Tối đa hóa tốc độ xử lý khi CPU/GPU còn dư dả tài nguyên
             cfg.ai_model_name = "sunxds_0.8.0.onnx"
             cfg.ai_model_image_size = 416
-            cfg.AI_conf = 0.14
+            cfg.AI_conf = 0.10 if is_sniper else 0.11
             cfg.capture_fps = 80
-            cfg.mouse_pid_kp = 0.55
-            cfg.mouse_deadzone = 1.0
-            cfg.mouse_max_step = 30
+            cfg.mouse_pid_kp = 0.85 if is_sniper else 0.55
+            cfg.mouse_deadzone = 0.6 if is_sniper else 1.0
+            cfg.mouse_max_step = 35 if is_sniper else 30
             self.idle_sleep_ms = 0
             self.max_queue_age_ms = 20
             self.box_history_timeout_s = 0.25
