@@ -171,13 +171,21 @@ class MouseThread:
         self.bScope = self.check_target_in_scope(target_x, target_y, target_w, target_h, self.bScope_multiplier) if cfg.auto_shoot or cfg.triggerbot else False
         self.bScope = cfg.force_click or self.bScope
 
-        # Dynamic Latency Lead Compensation:
-        # Bù độ trễ hệ thống (capture + YOLO + mouse = ~25ms).
-        # Khi zombie di chuyển ngang, bù đúng 25ms forward vector giúp tâm súng bám dính chặt chẽ
-        # vào đầu/cổ y hệt như video 2 ("Lunar V2 Neural Network AI POV") mà không bị trễ vài pixel phía sau.
-        lead_time = 0.025
+        # Lunar V2 Feature 1: Adaptive Real-Time Pipeline Latency Lead
+        # Tự động tính toán độ trễ vòng lặp thực tế thay vì dùng giá trị cứng
+        now = time.time()
+        measured_dt = (now - self.prev_time) if self.prev_time else 0.025
+        lead_time = max(0.018, min(0.038, measured_dt * 1.15))
         effective_x = target_x + (vel_x * lead_time)
         effective_y = target_y + (vel_y * lead_time)
+
+        # Lunar V2 Feature 2: Multi-Point Dynamic Hit Surface Optimization
+        # Khi zombie di chuyển nhanh (|vel_x| > 60 px/s), tự động tịnh tiến vi mô điểm ngắm từ đỉnh đầu
+        # xuống hõm cổ/ngực trên để cụm đạn găm trọn vào hitbox, tránh bắn sượt tai khi zombie chạy.
+        if abs(vel_x) > 60.0 and target_h > 0:
+            strafe_intensity = min(1.0, (abs(vel_x) - 60.0) / 140.0)
+            strafe_y_drop = strafe_intensity * (target_h * 0.12)
+            effective_y += strafe_y_drop
 
         if not self.disable_prediction:
             current_time = time.time()
@@ -287,13 +295,23 @@ class MouseThread:
     def calc_movement(self, target_x, target_y, target_cls, shooting_state=False, target_w=0.0, target_h=0.0):
         is_firing = self._update_spray_state()
 
-        # Dynamic Spray Recoil Control:
-        # Tịnh tiến êm dịu điểm ngắm từ giữa đầu xuống hõm ngực/cổ để cụm đạn găm trúng đầu
+        # Reverse.AI / Delta Force Progressive Spray Model:
+        # Đường cong ghìm súng 3 pha chuẩn xác cho súng tự động:
+        # - Pha 1 (0.0s - 0.16s, 1-3 viên đầu): Giật nhẹ, ghìm êm để đạn găm ngay sọ.
+        # - Pha 2 (0.16s - 0.55s, viên 4-10): Độ nảy súng tăng mạnh, ghìm lũy tiến theo đường cong mượt.
+        # - Pha 3 (>= 0.55s, xả đạn dài): Ổn định tại trần recoil, tự động bù độ tản mát (bloom cone).
         spray_drop = 0.0
         if is_firing and target_h > 0:
-            spray_progress = min(1.0, max(0.0, (self.spray_time - 0.05) / 0.25))
-            max_drop = min(target_h * 0.45, cfg.recoil_pitch * 1.5)
-            spray_drop = spray_progress * max_drop
+            if self.spray_time < 0.16:
+                stage_factor = (self.spray_time / 0.16) * 0.30
+            elif self.spray_time < 0.55:
+                p = (self.spray_time - 0.16) / (0.55 - 0.16)
+                stage_factor = 0.30 + 0.55 * (3.0 * p**2 - 2.0 * p**3)
+            else:
+                stage_factor = 0.85 + 0.15 * min(1.0, (self.spray_time - 0.55) / 0.45)
+
+            max_drop = min(target_h * 0.50, cfg.recoil_pitch * 1.6)
+            spray_drop = stage_factor * max_drop
 
         effective_target_y = target_y + spray_drop
 
@@ -301,11 +319,15 @@ class MouseThread:
         offset_y = effective_target_y - self.center_y
         distance = math.hypot(offset_x, offset_y)
 
-        # Smooth deadzone:
+        # Lunar V2 Feature 3: Anti-Deadzone Dynamic Micro-Pulse
+        # Khử ma sát lót chuột và micro-deadzone trong game ở cự ly vi mô (1.0 - 2.8px)
         if distance < cfg.mouse_deadzone:
             return 0.0, 0.0
 
-        smooth_factor = min(1.0, max(0.40, distance / 3.0)) if distance < 3.0 else 1.0
+        if distance < 2.8:
+            smooth_factor = min(1.0, max(0.55, distance / 2.5))
+        else:
+            smooth_factor = 1.0
 
         degrees_per_pixel_x = self.fov_x / self.screen_width
         degrees_per_pixel_y = self.fov_y / self.screen_height
@@ -321,10 +343,17 @@ class MouseThread:
         move_x = self.pid_x.update(raw_move_x * smooth_factor, current_time=now)
         move_y = self.pid_y.update(raw_move_y * smooth_factor, current_time=now)
 
-        # Trợ lực ghìm tâm tuyến tính khi xả súng:
+        # Trigger-Coupled Drag: Trợ lực ghìm tâm lũy tiến khi xả súng liên thanh
         if cfg.recoil_compensation and is_firing:
-            spray_progress = min(1.0, max(0.0, (self.spray_time - 0.04) / 0.25))
-            direct_pull = spray_progress * cfg.recoil_pitch * 0.8
+            if self.spray_time < 0.16:
+                pull_stage = (self.spray_time / 0.16) * 0.35
+            elif self.spray_time < 0.55:
+                p = (self.spray_time - 0.16) / (0.55 - 0.16)
+                pull_stage = 0.35 + 0.50 * (3.0 * p**2 - 2.0 * p**3)
+            else:
+                pull_stage = 0.85 + 0.15 * min(1.0, (self.spray_time - 0.55) / 0.45)
+
+            direct_pull = pull_stage * cfg.recoil_pitch * 0.90
             direct_pull = min(direct_pull, cfg.recoil_max_pitch)
             move_y += direct_pull * (scale_y / 1.5)
 
