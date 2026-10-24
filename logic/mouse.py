@@ -55,7 +55,7 @@ class PIDController:
         raw_output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
 
         # Critically damped smoothing: loại bỏ triệt để rung lắc do jitter AI, bám dính êm ru vào zombie di chuyển
-        alpha = 0.65
+        alpha = 0.45
         self.smooth_output = alpha * raw_output + (1.0 - alpha) * self.smooth_output
 
         self.prev_error = error
@@ -171,21 +171,20 @@ class MouseThread:
         self.bScope = self.check_target_in_scope(target_x, target_y, target_w, target_h, self.bScope_multiplier) if cfg.auto_shoot or cfg.triggerbot else False
         self.bScope = cfg.force_click or self.bScope
 
-        # Lunar V2 Feature 1: Adaptive Real-Time Pipeline Latency Lead
-        # Tự động tính toán độ trễ vòng lặp thực tế thay vì dùng giá trị cứng
-        now = time.time()
-        measured_dt = (now - self.prev_time) if self.prev_time else 0.025
-        lead_time = max(0.018, min(0.038, measured_dt * 1.15))
-        effective_x = target_x + (vel_x * lead_time)
-        effective_y = target_y + (vel_y * lead_time)
+        # Stable Target Anchoring: Trong hệ quy chiếu camera di động, điểm ngắm bám trực tiếp vào
+        # tọa độ mục tiêu thực tế (target_x, target_y).
+        # Loại bỏ hoàn toàn việc cộng dồn (vel_x * lead_time) nhằm triệt tiêu phản hồi âm 180 độ
+        # gây ra hiện tượng rung lắc chuột loạn xạ và vẩy sang tường.
+        effective_x = target_x
+        effective_y = target_y
 
-        # Lunar V2 Feature 2: Multi-Point Dynamic Hit Surface Optimization
+        # Multi-Point Dynamic Hit Surface Optimization:
         # Khi ở chế độ súng ngắm (Sniper Mode): Khóa chết 100% vào hộp sọ / mắt (Pinpoint Headshot Lock).
         # Tuyệt đối KHÔNG hạ điểm ngắm xuống ngực hay cổ kể cả khi zombie chạy nhanh, đảm bảo 1-hit kill!
         if not getattr(cfg, 'weapon_is_sniper', False):
-            if abs(vel_x) > 60.0 and target_h > 0:
-                strafe_intensity = min(1.0, (abs(vel_x) - 60.0) / 140.0)
-                strafe_y_drop = strafe_intensity * (target_h * 0.12)
+            if abs(vel_x) > 80.0 and target_h > 0 and not is_firing:
+                strafe_intensity = min(1.0, (abs(vel_x) - 80.0) / 120.0)
+                strafe_y_drop = strafe_intensity * (target_h * 0.10)
                 effective_y += strafe_y_drop
 
         if not self.disable_prediction:
@@ -319,13 +318,16 @@ class MouseThread:
         offset_y = effective_target_y - self.center_y
         distance = math.hypot(offset_x, offset_y)
 
-        # Lunar V2 Feature 3: Anti-Deadzone Dynamic Micro-Pulse
-        # Khử ma sát lót chuột và micro-deadzone trong game ở cự ly vi mô (1.0 - 2.8px)
-        if distance < cfg.mouse_deadzone:
+        # Smooth Asymptotic Approach & Anti-Deadzone:
+        # 1. Khi ở cự ly vi mô trong deadzone: Dừng hoàn toàn để tâm khóa bất động trên đầu mục tiêu
+        if distance <= cfg.mouse_deadzone:
             return 0.0, 0.0
 
-        if distance < 2.8:
-            smooth_factor = min(1.0, max(0.55, distance / 2.5))
+        # 2. Khi ở gần tâm (< 18px): Hãm tốc độ mượt mà (smooth cubic ease-out)
+        # Giúp tâm súng lướt êm và dừng nhẹ nhàng ngay trên đầu zombie mà không bị giật lố (overshoot)
+        if distance < 18.0:
+            norm = (distance - cfg.mouse_deadzone) / max(1.0, 18.0 - cfg.mouse_deadzone)
+            smooth_factor = 0.35 + 0.65 * (norm ** 0.85)
         else:
             smooth_factor = 1.0
 
@@ -340,10 +342,8 @@ class MouseThread:
         raw_move_y = offset_y * scale_y
 
         now = time.time()
-        # Súng ngắm tăng tốc độ vẩy tâm (Flick Snap) vào đầu kẻ địch
-        flick_gain = 1.08 if is_sniper else 1.0
-        move_x = self.pid_x.update(raw_move_x * smooth_factor * flick_gain, current_time=now)
-        move_y = self.pid_y.update(raw_move_y * smooth_factor * flick_gain, current_time=now)
+        move_x = self.pid_x.update(raw_move_x * smooth_factor, current_time=now)
+        move_y = self.pid_y.update(raw_move_y * smooth_factor, current_time=now)
 
         # Trigger-Coupled Drag: Trợ lực ghìm tâm lũy tiến khi xả súng liên thanh (không kích hoạt cho súng ngắm)
         if not is_sniper and cfg.recoil_compensation and is_firing:
@@ -398,8 +398,8 @@ class MouseThread:
         move_x = int(x)
         move_y = int(y)
 
-        # Max step safety clamp: giới hạn tối đa 35px/khung hình để loại bỏ hoàn toàn giật văng chuột
-        max_step = min(cfg.mouse_max_step, 35) if cfg.mouse_max_step > 0 else 35
+        # Max step safety clamp: giới hạn tối đa 25px/khung hình để loại bỏ hoàn toàn giật văng chuột
+        max_step = min(cfg.mouse_max_step, 25) if cfg.mouse_max_step > 0 else 25
         move_x = max(-max_step, min(max_step, move_x))
         move_y = max(-max_step, min(max_step, move_y))
 

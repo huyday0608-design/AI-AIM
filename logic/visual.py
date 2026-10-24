@@ -241,14 +241,19 @@ class Visuals(threading.Thread):
 
             # Locked Target Visual Indicator (As observed in Video 2 - Lunar V2 Neural Network AI POV):
             if draw_locked_target_data is not None:
-                lax, lay, lbw, lbh = draw_locked_target_data
+                if len(draw_locked_target_data) >= 6:
+                    lbx, lby, lbw, lbh, lax, lay = draw_locked_target_data
+                else:
+                    lax, lay, lbw, lbh = draw_locked_target_data
+                    lbx, lby = lax, lay
+                ilbx, ilby = int(lbx), int(lby)
                 ilax, ilay = int(lax), int(lay)
                 half_w, half_h = int(lbw / 2), int(lbh / 2)
-                bx1, by1 = max(0, ilax - half_w), max(0, ilay - half_h)
-                bx2, by2 = min(cfg.detection_window_width, ilax + half_w), min(cfg.detection_window_height, ilay + half_h)
+                bx1, by1 = max(0, ilbx - half_w), max(0, ilby - half_h)
+                bx2, by2 = min(cfg.detection_window_width, ilbx + half_w), min(cfg.detection_window_height, ilby + half_h)
 
                 if cfg.show_window:
-                    # Target Lock Bounding Box in vibrant gold:
+                    # Target Lock Bounding Box in vibrant gold centered on actual body:
                     cv2.rectangle(self.image, (bx1, by1), (bx2, by2), (0, 215, 255), 2)
 
                     # Red dot aimpoint directly on target center/head (y hệt video 2):
@@ -340,9 +345,11 @@ class Visuals(threading.Thread):
             if len(self.draw_history_point_data) > 30:
                 self.draw_history_point_data.pop(0)
         
-    def draw_locked_target(self, aim_x, aim_y, box_w, box_h):
+    def draw_locked_target(self, box_x, box_y, box_w, box_h, aim_x=None, aim_y=None):
         with self.data_lock:
-            self.draw_locked_target_data = (float(aim_x), float(aim_y), float(box_w), float(box_h))
+            ax = float(box_x) if aim_x is None else float(aim_x)
+            ay = float(box_y) if aim_y is None else float(aim_y)
+            self.draw_locked_target_data = (float(box_x), float(box_y), float(box_w), float(box_h), ax, ay)
 
     def clear_locked_target(self):
         with self.data_lock:

@@ -54,7 +54,7 @@ class LockedZombieTrack:
         self.has_velocity = False
         self.last_time = time.time()
 
-    def update(self, box_x, box_y, box_w, box_h, aim_x, aim_y, track_id=None, now=None):
+    def update(self, box_x, box_y, box_w, box_h, aim_x, aim_y, track_id=None, now=None, cls_id=None):
         if now is None:
             now = time.time()
         dt = max(0.001, min(0.15, now - self.last_time))
@@ -78,30 +78,25 @@ class LockedZombieTrack:
         self.box_w = 0.7 * self.box_w + 0.3 * float(box_w)
         self.box_h = 0.7 * self.box_h + 0.3 * float(box_h)
 
+        # Smooth aimpoint with clamp to eliminate vertical head/body alternation jitter:
         if aim_x is not None and aim_y is not None:
-            new_rel_x = (aim_x - self.box_x) / max(self.box_w, 1.0)
-            new_rel_y = (aim_y - self.box_y) / max(self.box_h, 1.0)
-            self.rel_aim_x = 0.7 * self.rel_aim_x + 0.3 * new_rel_x
-            self.rel_aim_y = 0.7 * self.rel_aim_y + 0.3 * new_rel_y
-            self.aim_x = float(aim_x)
-            self.aim_y = float(aim_y)
+            clamped_dx = max(-15.0, min(15.0, float(aim_x) - self.aim_x))
+            clamped_dy = max(-15.0, min(15.0, float(aim_y) - self.aim_y))
+            self.aim_x += 0.50 * clamped_dx
+            self.aim_y += 0.50 * clamped_dy
         else:
             self.aim_x = self.box_x + self.rel_aim_x * self.box_w
             self.aim_y = self.box_y + self.rel_aim_y * self.box_h
 
         if track_id is not None:
             self.track_id = track_id
+        if cls_id is not None:
+            self.cls_id = int(cls_id)
         self.last_time = now
 
     def predict(self, now=None):
-        if now is None:
-            now = time.time()
-        dt = max(0.0, min(0.15, now - self.last_time))
-        pred_bx = self.box_x + self.vel_x * dt
-        pred_by = self.box_y + self.vel_y * dt
-        pred_ax = self.aim_x + self.vel_x * dt
-        pred_ay = self.aim_y + self.vel_y * dt
-        return pred_bx, pred_by, self.box_w, self.box_h, pred_ax, pred_ay
+        # Stable holdover: giữ nguyên vị trí hộp mục tiêu ổn định, không bay lệch vào tường
+        return self.box_x, self.box_y, self.box_w, self.box_h, self.aim_x, self.aim_y
 
     def compute_diou(self, box_x, box_y, box_w, box_h, now=None):
         pred_bx, pred_by, pred_bw, pred_bh, _, _ = self.predict(now)
@@ -192,7 +187,11 @@ class FrameParser:
             if target.cls in hotkeys_watcher.clss:
                 mouse.process_data((target.x, target.y, target.w, target.h, target.cls, target.vel_x, target.vel_y))
                 if self.locked_track is not None:
-                    visuals.draw_locked_target(target.x, target.y, target.w, target.h)
+                    visuals.draw_locked_target(
+                        self.locked_track.box_x, self.locked_track.box_y,
+                        self.locked_track.box_w, self.locked_track.box_h,
+                        self.locked_track.aim_x, self.locked_track.aim_y
+                    )
 
     def _visualize_frame(self, frame):
         if cfg.show_window or cfg.show_overlay:
@@ -204,32 +203,22 @@ class FrameParser:
 
     def _handle_no_detections(self):
         now = time.time()
-        is_aiming = mouse.get_shooting_key_state() or cfg.mouse_auto_aim
         is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
 
-        # Muzzle Flash & Screen Shake Bridge:
-        # When firing, muzzle flash or recoil shake can obscure targets for up to 220ms.
-        # Coast using the locked target so tracking doesn't stutter or flicker on/off.
-        holdover = 0.25 if is_firing else self.flash_holdover
-        if (is_aiming or is_firing) and self.locked_track is not None and (now - self.locked_track.last_time <= holdover):
-            if hotkeys_watcher.clss is None:
-                hotkeys_watcher.active_classes()
-            if self.locked_track.cls_id in hotkeys_watcher.clss:
-                pred_bx, pred_by, pred_bw, pred_bh, pred_ax, pred_ay = self.locked_track.predict(now)
-                mouse.process_data((pred_ax, pred_ay, pred_bw, pred_bh, self.locked_track.cls_id, self.locked_track.vel_x, self.locked_track.vel_y))
-                visuals.draw_locked_target(pred_ax, pred_ay, pred_bw, pred_bh)
-                return
+        # Khi không có mục tiêu: KHÔNG tự động di chuột đẩy vào tường!
+        # Reset PID controller để chuột đứng yên ổn định.
+        mouse.reset_pid()
 
         # Reset lock if no targets seen within the active timeout period
-        active_timeout = 0.65 if is_firing else self.lock_timeout
+        active_timeout = 0.40 if is_firing else self.lock_timeout
         if self.locked_track is not None and (now - self.locked_track.last_time > active_timeout):
             self.locked_track = None
             self.locked_pos = None
             self.locked_track_id = None
             self.locked_cls = None
-            mouse.reset_pid()
             visuals.clear_locked_target()
-        if cfg.recoil_compensation:
+
+        if cfg.recoil_compensation and is_firing:
             mouse.apply_standalone_recoil()
         if cfg.show_window or cfg.show_overlay:
             visuals.clear()
@@ -403,11 +392,17 @@ class FrameParser:
         if not targets:
             return None
 
-        # 3. Dedicated DIoU Target Lock Commitment & Continuous Motion Tracking:
+        # 3. Dedicated Target Lock Commitment & Continuous Motion Tracking:
         selected = None
         aim_active = is_aiming or (now - self.last_aim_time <= 0.40)
+        has_active_lock = (
+            cfg.mouse_lock_target
+            and aim_active
+            and self.locked_track is not None
+            and (now - self.locked_track.last_time <= self.lock_timeout)
+        )
 
-        if cfg.mouse_lock_target and aim_active and self.locked_track is not None and (now - self.locked_track.last_time <= self.lock_timeout):
+        if has_active_lock:
             # Priority A: Match by persistent ByteTrack tracker_id if available
             if self.locked_track.track_id is not None:
                 for t in targets:
@@ -415,37 +410,26 @@ class FrameParser:
                         selected = t
                         break
 
-            # Priority B: Match by Distance-IoU against velocity-predicted bounding box
+            # Priority B: Spatial proximity matching to existing locked target
             if selected is None:
-                best_diou = -0.20  # Ngưỡng tương quan không gian tối thiểu
-                best_candidate = None
+                candidates = []
                 for t in targets:
-                    diou = self.locked_track.compute_diou(t['box_x'], t['box_y'], t['box_w'], t['box_h'], now)
-                    if diou > best_diou:
-                        best_diou = diou
-                        best_candidate = t
-                selected = best_candidate
+                    d = math.hypot(t['box_x'] - self.locked_track.box_x, t['box_y'] - self.locked_track.box_y)
+                    # Hạn chế độ dời tối đa giữa 2 khung hình để không bao giờ nhảy sang dummy kế bên:
+                    max_allowed_dist = max(30.0, self.locked_track.box_w * 0.90)
+                    if d <= max_allowed_dist:
+                        candidates.append((d, t))
+                if candidates:
+                    candidates.sort(key=lambda item: item[0])
+                    selected = candidates[0][1]
 
-            # Inertial Coasting along velocity trajectory:
-            # Nếu mục tiêu bị khói/lửa che khuất chớp nhoáng (<= 0.40s), lướt êm theo vận tốc của con zombie
-            # Tuyệt đối không nhảy sang con thứ 2!
-            if selected is None and (now - self.locked_track.last_time <= 0.40):
-                pred_bx, pred_by, pred_bw, pred_bh, pred_ax, pred_ay = self.locked_track.predict(now)
-                return Target(
-                    x=pred_bx,
-                    y=pred_by,
-                    w=pred_bw,
-                    h=pred_bh,
-                    cls=self.locked_track.cls_id,
-                    track_id=self.locked_track.track_id,
-                    aim_x=pred_ax,
-                    aim_y=pred_ay,
-                    vel_x=self.locked_track.vel_x,
-                    vel_y=self.locked_track.vel_y
-                )
+            # Khi mục tiêu bị che khuất tạm thời (chớp lửa đạn/khói bụi < lock_timeout):
+            # Giữ nguyên khóa mục tiêu hiện tại, KHÔNG nhảy lung tung sang dummy khác!
+            if selected is None:
+                return None
 
-        # 4. New Target Selection (Chỉ chạy khi chưa có mục tiêu hoặc con cũ đã chết hẳn sau 450ms):
-        if selected is None:
+        # 4. New Target Selection (Chỉ khi CHƯA có mục tiêu hoặc mục tiêu cũ đã biến mất hẳn > lock_timeout):
+        if selected is None and not has_active_lock:
             cx = capture.screen_x_center
             cy = capture.screen_y_center
             selected = min(targets, key=lambda t: math.hypot(t['aim_x'] - cx, t['aim_y'] - cy))
@@ -454,10 +438,10 @@ class FrameParser:
                     selected['box_x'], selected['box_y'], selected['box_w'], selected['box_h'],
                     selected['aim_x'], selected['aim_y'], selected['cls'], selected['track_id']
                 )
-        else:
+        elif selected is not None and self.locked_track is not None:
             self.locked_track.update(
                 selected['box_x'], selected['box_y'], selected['box_w'], selected['box_h'],
-                selected['aim_x'], selected['aim_y'], selected['track_id'], now
+                selected['aim_x'], selected['aim_y'], selected['track_id'], now, selected['cls']
             )
 
         if self.locked_track is None or selected is None:
