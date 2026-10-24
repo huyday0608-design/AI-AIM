@@ -26,9 +26,38 @@ class InputBackend:
         try:
             import win32api
             import win32con
+            import ctypes
+            from ctypes import wintypes
+
+            class MOUSEINPUT(ctypes.Structure):
+                _fields_ = [
+                    ("dx", wintypes.LONG),
+                    ("dy", wintypes.LONG),
+                    ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD),
+                    ("dwExtraInfo", ctypes.c_size_t),
+                ]
+
+            class _INPUT_UNION(ctypes.Union):
+                _fields_ = [("mi", MOUSEINPUT)]
+
+            class INPUT(ctypes.Structure):
+                _anonymous_ = ("_input",)
+                _fields_ = [
+                    ("type", wintypes.DWORD),
+                    ("_input", _INPUT_UNION),
+                ]
 
             self.win32api = win32api
             self.win32con = win32con
+            self._ctypes = ctypes
+            self._INPUT = INPUT
+            self._SendInput = ctypes.windll.user32.SendInput
+            try:
+                ctypes.windll.winmm.timeBeginPeriod(1)
+            except Exception:
+                pass
             self.mode = "win32"
             self.available = True
         except Exception as exc:
@@ -92,7 +121,22 @@ class InputBackend:
 
     def move_mouse(self, x, y):
         if self.mode == "win32":
-            self.win32api.mouse_event(self.win32con.MOUSEEVENTF_MOVE, int(x), int(y), 0, 0)
+            int_x = int(x)
+            int_y = int(y)
+            if hasattr(self, "_SendInput"):
+                try:
+                    inp = self._INPUT()
+                    inp.type = 0  # INPUT_MOUSE
+                    inp.mi.dx = int_x
+                    inp.mi.dy = int_y
+                    inp.mi.dwFlags = 0x0001  # MOUSEEVENTF_MOVE
+                    inp.mi.time = 0
+                    inp.mi.dwExtraInfo = 0
+                    if self._SendInput(1, self._ctypes.byref(inp), self._ctypes.sizeof(self._INPUT)) == 1:
+                        return True
+                except Exception:
+                    pass
+            self.win32api.mouse_event(self.win32con.MOUSEEVENTF_MOVE, int_x, int_y, 0, 0)
             return True
         if self._mouse_controller is not None:
             self._mouse_controller.move(int(x), int(y))
@@ -101,6 +145,15 @@ class InputBackend:
 
     def left_down(self):
         if self.mode == "win32":
+            if hasattr(self, "_SendInput"):
+                try:
+                    inp = self._INPUT()
+                    inp.type = 0
+                    inp.mi.dwFlags = 0x0002  # MOUSEEVENTF_LEFTDOWN
+                    if self._SendInput(1, self._ctypes.byref(inp), self._ctypes.sizeof(self._INPUT)) == 1:
+                        return True
+                except Exception:
+                    pass
             self.win32api.mouse_event(self.win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             return True
         if self._mouse_controller is not None and self._mouse_button is not None:
@@ -110,6 +163,15 @@ class InputBackend:
 
     def left_up(self):
         if self.mode == "win32":
+            if hasattr(self, "_SendInput"):
+                try:
+                    inp = self._INPUT()
+                    inp.type = 0
+                    inp.mi.dwFlags = 0x0004  # MOUSEEVENTF_LEFTUP
+                    if self._SendInput(1, self._ctypes.byref(inp), self._ctypes.sizeof(self._INPUT)) == 1:
+                        return True
+                except Exception:
+                    pass
             self.win32api.mouse_event(self.win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
             return True
         if self._mouse_controller is not None and self._mouse_button is not None:

@@ -189,7 +189,7 @@ def _find_cuda_paths(version: str = "12.8") -> list[str]:
     return [item for item in path_parts if "cuda" in item.lower() and version in item]
 
 
-def _python_probe(script: str, timeout: int = 30) -> dict[str, Any]:
+def _python_probe(script: str, timeout: int = 90) -> dict[str, Any]:
     try:
         result = subprocess.run(
             [sys.executable, "-c", script],

@@ -36,6 +36,7 @@ class Visuals(threading.Thread):
         self.draw_speed_data = None
         self.draw_bScope_data = None
         self.draw_history_point_data = []
+        self.draw_locked_target_data = None
         self.cls_model_data = CLASS_NAMES
         self.disabled_line_classes = NON_TARGET_CLASS_IDS
         self.start()
@@ -65,6 +66,15 @@ class Visuals(threading.Thread):
             
         while True:
             self.image = self.queue.get()
+            while not self.queue.empty():
+                try:
+                    newer = self.queue.get_nowait()
+                    if newer is None:
+                        self.image = None
+                        break
+                    self.image = newer
+                except queue.Empty:
+                    break
             
             if self.image is None:
                 self.destroy()
@@ -92,6 +102,7 @@ class Visuals(threading.Thread):
                 draw_speed_data = self.draw_speed_data
                 draw_bScope_data = self.draw_bScope_data
                 draw_history_point_data = list(self.draw_history_point_data)
+                draw_locked_target_data = self.draw_locked_target_data
             
             # simple line
             if draw_line_data:
@@ -133,7 +144,7 @@ class Visuals(threading.Thread):
                     
                     # cv2 labels
                     if cfg.show_window and cfg.show_labels and not cfg.show_conf:
-                        cv2.putText(self.image, str_cls, (x0, y0 - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 200, 0), 1, cv2.LINE_AA)
+                        cv2.putText(self.image, str_cls, (x0, y0 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 0), 1, cv2.LINE_AA)
                     
                     # format conf text for cv2 and overlay
                     if cfg.show_window or cfg.show_overlay:
@@ -141,7 +152,7 @@ class Visuals(threading.Thread):
                     
                     # cv2 conf
                     if cfg.show_window and cfg.show_conf:
-                        cv2.putText(self.image, conf_text, (x0, y0 - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 200, 0), 1, cv2.LINE_AA)
+                        cv2.putText(self.image, conf_text, (x0, y0 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 0), 1, cv2.LINE_AA)
                     
                     if cfg.show_overlay and (cfg.overlay_show_conf or cfg.overlay_show_labels):
                         # out of overlay
@@ -211,6 +222,51 @@ class Visuals(threading.Thread):
                 for x, y in draw_history_point_data:
                     if cfg.show_window:
                         cv2.circle(self.image, (x + capture.screen_x_center, y + capture.screen_y_center), radius=1, color=(0, 0, 255), thickness=2)
+
+            # Scope FOV Circle Reticle (As observed in Video 1 - Reverse.AI):
+            fov_r = int(cfg.mouse_fov_width / 2)
+            if fov_r > 5:
+                if cfg.show_window:
+                    cv2.circle(self.image, (capture.screen_x_center, capture.screen_y_center), fov_r, (0, 215, 255), 1, cv2.LINE_AA)
+                    cv2.drawMarker(self.image, (capture.screen_x_center, capture.screen_y_center), (0, 215, 255), cv2.MARKER_CROSS, 8, 1)
+                if cfg.show_overlay:
+                    overlay.draw_oval(
+                        capture.screen_x_center - fov_r,
+                        capture.screen_y_center - fov_r,
+                        capture.screen_x_center + fov_r,
+                        capture.screen_y_center + fov_r,
+                        color='gold',
+                        size=1
+                    )
+
+            # Locked Target Visual Indicator (As observed in Video 2 - Lunar V2 Neural Network AI POV):
+            if draw_locked_target_data is not None:
+                lax, lay, lbw, lbh = draw_locked_target_data
+                ilax, ilay = int(lax), int(lay)
+                half_w, half_h = int(lbw / 2), int(lbh / 2)
+                bx1, by1 = max(0, ilax - half_w), max(0, ilay - half_h)
+                bx2, by2 = min(cfg.detection_window_width, ilax + half_w), min(cfg.detection_window_height, ilay + half_h)
+
+                if cfg.show_window:
+                    # Target Lock Bounding Box in vibrant gold:
+                    cv2.rectangle(self.image, (bx1, by1), (bx2, by2), (0, 215, 255), 2)
+
+                    # Red dot aimpoint directly on target center/head (y hệt video 2):
+                    cv2.circle(self.image, (ilax, ilay), 3, (0, 0, 255), -1, cv2.LINE_AA)
+                    cv2.circle(self.image, (ilax, ilay), 6, (0, 255, 255), 1, cv2.LINE_AA)
+
+                    # Bold Electric Blue "LOCKED" indicator badge above the head:
+                    badge_text = "LOCKED"
+                    text_x = max(10, ilax - 32)
+                    text_y = max(22, by1 - 8)
+                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.60, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.60, (255, 200, 20), 2, cv2.LINE_AA)
+
+                if cfg.show_overlay:
+                    if cfg.overlay_show_boxes:
+                        overlay.draw_square(bx1, by1, bx2, by2, 'yellow', 2)
+                    overlay.draw_point(ilax, ilay, 'red', 3)
+                    overlay.draw_text(ilax, max(12, by1 - 8), "LOCKED", 11, 'cyan')
                     
             # debug window: resize
             if cfg.show_window:
@@ -279,6 +335,14 @@ class Visuals(threading.Thread):
             if len(self.draw_history_point_data) > 30:
                 self.draw_history_point_data.pop(0)
         
+    def draw_locked_target(self, aim_x, aim_y, box_w, box_h):
+        with self.data_lock:
+            self.draw_locked_target_data = (float(aim_x), float(aim_y), float(box_w), float(box_h))
+
+    def clear_locked_target(self):
+        with self.data_lock:
+            self.draw_locked_target_data = None
+
     def clear(self):
         with self.data_lock:
             self.draw_boxes_data = None
@@ -286,6 +350,7 @@ class Visuals(threading.Thread):
             self.draw_speed_data = None
             self.draw_predicted_position_data = None
             self.draw_bScope_data = None
+            self.draw_locked_target_data = None
         
     def destroy(self):
         cv2.destroyAllWindows()

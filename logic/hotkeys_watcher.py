@@ -9,6 +9,7 @@ from logic.capture import capture
 from logic.mouse import mouse
 from logic.visual import visuals
 from logic.platform import input_backend
+from logic.weapons import weapon_manager
 from logic.model_classes import (
     HEAD_CLASS_ID,
     HIDEOUT_TARGET_CLASS_IDS,
@@ -29,8 +30,10 @@ class HotkeysWatcher(threading.Thread):
         
     def run(self):
         cfg_reload_prev_state = False
+        prev_weapon_keys = set()
         while True:
             cfg_reload_prev_state = self.process_hotkeys(cfg_reload_prev_state)
+            prev_weapon_keys = weapon_manager.check_hotkeys(input_backend, prev_weapon_keys)
             self.reload_config_if_changed()
                 
             # terminate
@@ -60,6 +63,7 @@ class HotkeysWatcher(threading.Thread):
             self.apply_config_changes()
 
     def apply_config_changes(self):
+        weapon_manager.load_profiles()
         capture.restart()
         mouse.update_settings()
         try:

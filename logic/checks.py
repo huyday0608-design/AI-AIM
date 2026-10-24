@@ -42,6 +42,10 @@ def check_model_fp16():
         tensor_type = output_tensor.type.tensor_type
         if tensor_type.elem_type == onnx.TensorProto.FLOAT16:
             return True
+
+    for init_tensor in graph.initializer:
+        if init_tensor.data_type == onnx.TensorProto.FLOAT16:
+            return True
     
     return False
 

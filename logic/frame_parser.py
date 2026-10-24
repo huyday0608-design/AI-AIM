@@ -1,3 +1,5 @@
+import time
+import math
 import torch
 import supervision as sv
 import numpy as np
@@ -8,21 +10,143 @@ from logic.capture import capture
 from logic.visual import visuals
 from logic.mouse import mouse
 from logic.shooting import shooting
+from logic.platform import input_backend
 from logic.model_classes import HEAD_CLASS_ID, is_head_class
 
+
 class Target:
-    def __init__(self, x, y, w, h, cls):
+    def __init__(self, x, y, w, h, cls, track_id=None, aim_x=None, aim_y=None, vel_x=0.0, vel_y=0.0):
         self.cls = int(cls)
-        self.x = x
-        self.y = y if is_head_class(self.cls) else (y - cfg.body_y_offset * h)
-        self.w = w
-        self.h = h
+        self.w = float(w)
+        self.h = float(h)
+        self.track_id = track_id
+        self.vel_x = float(vel_x)
+        self.vel_y = float(vel_y)
+        if aim_x is not None and aim_y is not None:
+            self.x = float(aim_x)
+            self.y = float(aim_y)
+        else:
+            self.x = float(x)
+            self.y = float(y) if is_head_class(self.cls) else float(y - cfg.body_y_offset * self.h)
+
+
+class LockedZombieTrack:
+    """
+    Robust DIoU + Velocity Kalman-style Tracklet for moving targets.
+    - Tracks position, bounding box, relative head aimpoint, and velocity vector.
+    - DIoU matching guarantees moving zombies are continuously tracked without jumping to nearby zombies.
+    - Preserves relative head aimpoint even if head detection flickers off.
+    - Coasts smoothly along velocity trajectory during muzzle flash / smoke.
+    """
+    def __init__(self, box_x, box_y, box_w, box_h, aim_x, aim_y, cls_id, track_id=None):
+        self.box_x = float(box_x)
+        self.box_y = float(box_y)
+        self.box_w = float(box_w)
+        self.box_h = float(box_h)
+        self.aim_x = float(aim_x)
+        self.aim_y = float(aim_y)
+        self.cls_id = int(cls_id)
+        self.track_id = track_id
+        self.rel_aim_x = (self.aim_x - self.box_x) / max(self.box_w, 1.0)
+        self.rel_aim_y = (self.aim_y - self.box_y) / max(self.box_h, 1.0)
+        self.vel_x = 0.0
+        self.vel_y = 0.0
+        self.has_velocity = False
+        self.last_time = time.time()
+
+    def update(self, box_x, box_y, box_w, box_h, aim_x, aim_y, track_id=None, now=None):
+        if now is None:
+            now = time.time()
+        dt = max(0.001, min(0.15, now - self.last_time))
+
+        inst_vx = (box_x - self.box_x) / dt
+        inst_vy = (box_y - self.box_y) / dt
+        inst_vx = max(-350.0, min(350.0, inst_vx))
+        inst_vy = max(-350.0, min(350.0, inst_vy))
+
+        if not self.has_velocity:
+            self.vel_x = inst_vx
+            self.vel_y = inst_vy
+            self.has_velocity = True
+        else:
+            alpha = 0.50
+            self.vel_x = alpha * inst_vx + (1.0 - alpha) * self.vel_x
+            self.vel_y = alpha * inst_vy + (1.0 - alpha) * self.vel_y
+
+        self.box_x = float(box_x)
+        self.box_y = float(box_y)
+        self.box_w = 0.7 * self.box_w + 0.3 * float(box_w)
+        self.box_h = 0.7 * self.box_h + 0.3 * float(box_h)
+
+        if aim_x is not None and aim_y is not None:
+            new_rel_x = (aim_x - self.box_x) / max(self.box_w, 1.0)
+            new_rel_y = (aim_y - self.box_y) / max(self.box_h, 1.0)
+            self.rel_aim_x = 0.7 * self.rel_aim_x + 0.3 * new_rel_x
+            self.rel_aim_y = 0.7 * self.rel_aim_y + 0.3 * new_rel_y
+            self.aim_x = float(aim_x)
+            self.aim_y = float(aim_y)
+        else:
+            self.aim_x = self.box_x + self.rel_aim_x * self.box_w
+            self.aim_y = self.box_y + self.rel_aim_y * self.box_h
+
+        if track_id is not None:
+            self.track_id = track_id
+        self.last_time = now
+
+    def predict(self, now=None):
+        if now is None:
+            now = time.time()
+        dt = max(0.0, min(0.15, now - self.last_time))
+        pred_bx = self.box_x + self.vel_x * dt
+        pred_by = self.box_y + self.vel_y * dt
+        pred_ax = self.aim_x + self.vel_x * dt
+        pred_ay = self.aim_y + self.vel_y * dt
+        return pred_bx, pred_by, self.box_w, self.box_h, pred_ax, pred_ay
+
+    def compute_diou(self, box_x, box_y, box_w, box_h, now=None):
+        pred_bx, pred_by, pred_bw, pred_bh, _, _ = self.predict(now)
+        x1_a, y1_a = pred_bx - pred_bw / 2.0, pred_by - pred_bh / 2.0
+        x2_a, y2_a = pred_bx + pred_bw / 2.0, pred_by + pred_bh / 2.0
+        x1_b, y1_b = box_x - box_w / 2.0, box_y - box_h / 2.0
+        x2_b, y2_b = box_x + box_w / 2.0, box_y + box_h / 2.0
+
+        ix1 = max(x1_a, x1_b)
+        iy1 = max(y1_a, y1_b)
+        ix2 = min(x2_a, x2_b)
+        iy2 = min(y2_a, y2_b)
+
+        iw = max(0.0, ix2 - ix1)
+        ih = max(0.0, iy2 - iy1)
+        inter_area = iw * ih
+        union_area = (pred_bw * pred_bh) + (box_w * box_h) - inter_area
+        iou = inter_area / max(union_area, 1e-6)
+
+        c_x1 = min(x1_a, x1_b)
+        c_y1 = min(y1_a, y1_b)
+        c_x2 = max(x2_a, x2_b)
+        c_y2 = max(y2_a, y2_b)
+        c_diag_sq = (c_x2 - c_x1)**2 + (c_y2 - c_y1)**2
+        dist_sq = (pred_bx - box_x)**2 + (pred_by - box_y)**2
+        diou = iou - (dist_sq / max(c_diag_sq, 1e-6))
+        return diou
+
 
 class FrameParser:
     def __init__(self):
         self.arch = self.get_arch()
         self._center = None
         self._center_cache_key = None
+        # Target Lock / Persistence state
+        self.locked_track = None
+        self.locked_pos = None
+        self.locked_track_id = None
+        self.locked_time = 0.0
+        self.last_aim_time = 0.0
+        self.locked_w = 0.0
+        self.locked_h = 0.0
+        self.locked_cls = None
+        self.lock_timeout = 0.45  # 450ms grace period trước khi xác nhận mục tiêu chết hẳn
+        self.flash_holdover = 0.30  # 300ms bridge for muzzle flash / shake / frame loss
 
     def parse(self, result):
         if result is None:
@@ -66,7 +190,9 @@ class FrameParser:
                 hotkeys_watcher.active_classes()
 
             if target.cls in hotkeys_watcher.clss:
-                mouse.process_data((target.x, target.y, target.w, target.h, target.cls))
+                mouse.process_data((target.x, target.y, target.w, target.h, target.cls, target.vel_x, target.vel_y))
+                if self.locked_track is not None:
+                    visuals.draw_locked_target(target.x, target.y, target.w, target.h)
 
     def _visualize_frame(self, frame):
         if cfg.show_window or cfg.show_overlay:
@@ -77,24 +203,55 @@ class FrameParser:
                 visuals.draw_speed(frame.speed['preprocess'], frame.speed['inference'], frame.speed['postprocess'])
 
     def _handle_no_detections(self):
+        now = time.time()
+        is_aiming = mouse.get_shooting_key_state() or cfg.mouse_auto_aim
+        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
+
+        # Muzzle Flash & Screen Shake Bridge:
+        # When firing, muzzle flash or recoil shake can obscure targets for up to 220ms.
+        # Coast using the locked target so tracking doesn't stutter or flicker on/off.
+        holdover = 0.25 if is_firing else self.flash_holdover
+        if (is_aiming or is_firing) and self.locked_track is not None and (now - self.locked_track.last_time <= holdover):
+            if hotkeys_watcher.clss is None:
+                hotkeys_watcher.active_classes()
+            if self.locked_track.cls_id in hotkeys_watcher.clss:
+                pred_bx, pred_by, pred_bw, pred_bh, pred_ax, pred_ay = self.locked_track.predict(now)
+                mouse.process_data((pred_ax, pred_ay, pred_bw, pred_bh, self.locked_track.cls_id, self.locked_track.vel_x, self.locked_track.vel_y))
+                visuals.draw_locked_target(pred_ax, pred_ay, pred_bw, pred_bh)
+                return
+
+        # Reset lock if no targets seen within the active timeout period
+        active_timeout = 0.65 if is_firing else self.lock_timeout
+        if self.locked_track is not None and (now - self.locked_track.last_time > active_timeout):
+            self.locked_track = None
+            self.locked_pos = None
+            self.locked_track_id = None
+            self.locked_cls = None
+            mouse.reset_pid()
+            visuals.clear_locked_target()
+        if cfg.recoil_compensation:
+            mouse.apply_standalone_recoil()
         if cfg.show_window or cfg.show_overlay:
             visuals.clear()
         if cfg.auto_shoot or cfg.triggerbot:
             shooting.shoot(False, False)
 
     def sort_targets(self, frame):
+        tracker_ids = None
         if isinstance(frame, sv.Detections):
             boxes_array, classes_tensor = self._convert_sv_to_tensor(frame)
+            tracker_ids = getattr(frame, "tracker_id", None)
         else:
             if frame.boxes is None or len(frame.boxes) == 0:
                 return None
             boxes_array = self._to_tensor(frame.boxes.xywh, dtype=torch.float32)
             classes_tensor = self._to_tensor(frame.boxes.cls, dtype=torch.long)
+            tracker_ids = getattr(frame.boxes, "id", None) if hasattr(frame, "boxes") else None
 
         if not classes_tensor.numel():
             return None
 
-        return self._find_nearest_target(boxes_array, classes_tensor)
+        return self._find_nearest_target(boxes_array, classes_tensor, tracker_ids)
 
     def _convert_sv_to_tensor(self, frame):
         xyxy = np.asarray(frame.xyxy, dtype=np.float32)
@@ -114,35 +271,217 @@ class FrameParser:
             return value.to(device=self.arch, dtype=dtype)
         return torch.as_tensor(value, dtype=dtype, device=self.arch)
 
-    def _find_nearest_target(self, boxes_array, classes_tensor):
-        center = self._get_center(boxes_array.device)
-        distances_sq = torch.sum((boxes_array[:, :2] - center) ** 2, dim=1)
+    def _find_nearest_target(self, boxes_array, classes_tensor, tracker_ids=None):
         candidate_idxs = self._get_active_candidate_idxs(classes_tensor)
 
+        now = time.time()
+        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
+        is_aiming = mouse.get_shooting_key_state() or cfg.mouse_auto_aim or is_firing
+        if is_aiming:
+            self.last_aim_time = now
+        else:
+            # Tap-fire grace period: Nhấp nhả chuột không làm mất khóa mục tiêu
+            if (now - self.last_aim_time) > 0.40:
+                self.locked_track = None
+                self.locked_pos = None
+                self.locked_track_id = None
+
         if candidate_idxs.numel() == 0:
+            if self.locked_track is not None and (now - self.locked_track.last_time) > self.lock_timeout:
+                self.locked_track = None
+                self.locked_pos = None
+                self.locked_track_id = None
             return None
 
-        head_candidate_mask = classes_tensor[candidate_idxs] == HEAD_CLASS_ID
+        # Extract boxes and classes for candidate detections
+        cand_boxes = boxes_array[candidate_idxs, :4].cpu().numpy()
+        cand_classes = classes_tensor[candidate_idxs].cpu().numpy()
 
-        if cfg.disable_headshot:
-            non_head_candidate_idxs = candidate_idxs[~head_candidate_mask]
+        bodies = []
+        heads = []
 
-            if non_head_candidate_idxs.numel() == 0:
-                return None
+        for idx, (b, cls_id) in enumerate(zip(cand_boxes, cand_classes)):
+            tid = None
+            if tracker_ids is not None:
+                try:
+                    t = tracker_ids[candidate_idxs[idx].item()]
+                    tid = t.item() if hasattr(t, "item") else t
+                    if tid == -1:
+                        tid = None
+                except (IndexError, TypeError):
+                    pass
 
-            size_factor = (boxes_array[:, 2] * boxes_array[:, 3]).clamp_min(1.0)
-            distances_sq = distances_sq / size_factor
-            candidate_idxs = non_head_candidate_idxs
-            nearest_idx = candidate_idxs[torch.argmin(distances_sq[candidate_idxs])].item()
+            if cls_id == HEAD_CLASS_ID:
+                heads.append({'box': b, 'cls': int(cls_id), 'tid': tid})
+            else:
+                bodies.append({'box': b, 'cls': int(cls_id), 'tid': tid})
+
+        matched_head_indices = set()
+        targets = []
+
+        # 1. Match heads to bodies to form complete physical targets with headshot aimpoints
+        win_w = float(cfg.detection_window_width)
+        win_h = float(cfg.detection_window_height)
+        for b in bodies:
+            bx, by, bw, bh = b['box']
+            # Reject full-screen wall / texture hallucination glitches (> 85% screen size)
+            if bw > 0.85 * win_w and bh > 0.85 * win_h:
+                continue
+
+            matched_head = None
+            if not cfg.disable_headshot:
+                for h_idx, h in enumerate(heads):
+                    hx, hy, hw, hh = h['box']
+                    # Head lies in the upper section of the body bounding box
+                    if abs(hx - bx) <= 0.60 * bw and (by - 0.60 * bh) <= hy <= (by + 0.15 * bh):
+                        matched_head = h
+                        matched_head_indices.add(h_idx)
+                        break
+
+            if matched_head is not None:
+                hx, hy, hw, hh = matched_head['box']
+                targets.append({
+                    'aim_x': float(hx),
+                    'aim_y': float(hy),
+                    'box_x': float(bx),
+                    'box_y': float(by),
+                    'box_w': float(bw),
+                    'box_h': float(bh),
+                    'cls': HEAD_CLASS_ID,
+                    'eff_h': float(bh),
+                    'track_id': b['tid'] or matched_head['tid']
+                })
+            else:
+                aim_y = float(by) if cfg.disable_headshot else float(by - cfg.body_y_offset * bh)
+                targets.append({
+                    'aim_x': float(bx),
+                    'aim_y': aim_y,
+                    'box_x': float(bx),
+                    'box_y': float(by),
+                    'box_w': float(bw),
+                    'box_h': float(bh),
+                    'cls': b['cls'],
+                    'eff_h': float(bh),
+                    'track_id': b['tid']
+                })
+
+        # 2. Add legitimate unmatched heads (e.g. enemy behind cover with only head visible)
+        # Lọc triệt để đồ vật môi trường (ống nước, đèn trần, van xả, mô hình súng/tay của người chơi):
+        if not cfg.disable_headshot:
+            win_w = float(cfg.detection_window_width)
+            win_h = float(cfg.detection_window_height)
+            for h_idx, h in enumerate(heads):
+                if h_idx not in matched_head_indices:
+                    hx, hy, hw, hh = h['box']
+
+                    # Bộ lọc 1: Hình dạng đầu người luôn có tỷ lệ đứng hoặc vuông (hh >= hw * 0.75).
+                    # Các ống nước nằm ngang, thanh xà, van tường thường có bề ngang dài hơn chiều cao (hw > 1.25 * hh).
+                    if hw > 1.25 * hh:
+                        continue
+
+                    # Bộ lọc 2: Kích thước hợp lý. Đầu ở cự ly chiến đấu không thể chiếm quá 25% màn hình FOV.
+                    if hw > 0.22 * win_w or hh > 0.25 * win_h:
+                        continue
+
+                    # Bộ lọc 3: Vùng vũ khí của bản thân (Player Weapon Deadzone).
+                    # Súng, laser và tay cầm của nhân vật luôn nằm ở vùng đáy màn hình (hy > 0.68 * win_h và hx > 0.32 * win_w).
+                    if hy > 0.68 * win_h and hx > 0.32 * win_w:
+                        continue
+
+                    targets.append({
+                        'aim_x': float(hx),
+                        'aim_y': float(hy),
+                        'box_x': float(hx),
+                        'box_y': float(hy),
+                        'box_w': float(hw),
+                        'box_h': float(hh),
+                        'cls': HEAD_CLASS_ID,
+                        'eff_h': float(hh * 4.0),
+                        'track_id': h['tid']
+                    })
+
+        if not targets:
+            return None
+
+        # 3. Dedicated DIoU Target Lock Commitment & Continuous Motion Tracking:
+        selected = None
+        aim_active = is_aiming or (now - self.last_aim_time <= 0.40)
+
+        if cfg.mouse_lock_target and aim_active and self.locked_track is not None and (now - self.locked_track.last_time <= self.lock_timeout):
+            # Priority A: Match by persistent ByteTrack tracker_id if available
+            if self.locked_track.track_id is not None:
+                for t in targets:
+                    if t['track_id'] is not None and t['track_id'] == self.locked_track.track_id:
+                        selected = t
+                        break
+
+            # Priority B: Match by Distance-IoU against velocity-predicted bounding box
+            if selected is None:
+                best_diou = -0.20  # Ngưỡng tương quan không gian tối thiểu
+                best_candidate = None
+                for t in targets:
+                    diou = self.locked_track.compute_diou(t['box_x'], t['box_y'], t['box_w'], t['box_h'], now)
+                    if diou > best_diou:
+                        best_diou = diou
+                        best_candidate = t
+                selected = best_candidate
+
+            # Inertial Coasting along velocity trajectory:
+            # Nếu mục tiêu bị khói/lửa che khuất chớp nhoáng (<= 0.40s), lướt êm theo vận tốc của con zombie
+            # Tuyệt đối không nhảy sang con thứ 2!
+            if selected is None and (now - self.locked_track.last_time <= 0.40):
+                pred_bx, pred_by, pred_bw, pred_bh, pred_ax, pred_ay = self.locked_track.predict(now)
+                return Target(
+                    x=pred_bx,
+                    y=pred_by,
+                    w=pred_bw,
+                    h=pred_bh,
+                    cls=self.locked_track.cls_id,
+                    track_id=self.locked_track.track_id,
+                    aim_x=pred_ax,
+                    aim_y=pred_ay,
+                    vel_x=self.locked_track.vel_x,
+                    vel_y=self.locked_track.vel_y
+                )
+
+        # 4. New Target Selection (Chỉ chạy khi chưa có mục tiêu hoặc con cũ đã chết hẳn sau 450ms):
+        if selected is None:
+            cx = capture.screen_x_center
+            cy = capture.screen_y_center
+            selected = min(targets, key=lambda t: math.hypot(t['aim_x'] - cx, t['aim_y'] - cy))
+            if selected is not None:
+                self.locked_track = LockedZombieTrack(
+                    selected['box_x'], selected['box_y'], selected['box_w'], selected['box_h'],
+                    selected['aim_x'], selected['aim_y'], selected['cls'], selected['track_id']
+                )
         else:
-            if head_candidate_mask.any():
-                candidate_idxs = candidate_idxs[head_candidate_mask]
-            nearest_idx = candidate_idxs[torch.argmin(distances_sq[candidate_idxs])].item()
+            self.locked_track.update(
+                selected['box_x'], selected['box_y'], selected['box_w'], selected['box_h'],
+                selected['aim_x'], selected['aim_y'], selected['track_id'], now
+            )
 
-        target_data = boxes_array[nearest_idx, :4].cpu().numpy()
-        target_class = int(classes_tensor[nearest_idx].item())
+        if self.locked_track is None or selected is None:
+            return None
 
-        return Target(*target_data, target_class)
+        self.locked_pos = (self.locked_track.aim_x, self.locked_track.aim_y)
+        self.locked_track_id = self.locked_track.track_id
+        self.locked_w = self.locked_track.box_w
+        self.locked_h = self.locked_track.box_h
+        self.locked_cls = self.locked_track.cls_id
+        self.locked_time = self.locked_track.last_time
+
+        return Target(
+            x=self.locked_track.box_x,
+            y=self.locked_track.box_y,
+            w=self.locked_track.box_w,
+            h=self.locked_track.box_h,
+            cls=self.locked_track.cls_id,
+            track_id=self.locked_track.track_id,
+            aim_x=self.locked_track.aim_x,
+            aim_y=self.locked_track.aim_y,
+            vel_x=self.locked_track.vel_x,
+            vel_y=self.locked_track.vel_y
+        )
 
     def _get_active_candidate_idxs(self, classes_tensor):
         if hotkeys_watcher.clss is None:
@@ -173,6 +512,14 @@ class FrameParser:
         self.arch = self.get_arch()
         self._center = None
         self._center_cache_key = None
+        self.locked_track = None
+        self.locked_pos = None
+        self.locked_track_id = None
+        self.locked_w = 0.0
+        self.locked_h = 0.0
+        self.locked_cls = None
+        self.locked_time = 0.0
+        self.last_aim_time = 0.0
 
     def get_arch(self):
         if cfg.AI_enable_AMD:
@@ -186,5 +533,6 @@ class FrameParser:
             return cfg.AI_device
         else:
             return f'cuda:{cfg.AI_device}'
+
 
 frameParser = FrameParser()

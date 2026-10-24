@@ -37,13 +37,42 @@ class Capture(threading.Thread):
         self.monitor = None
         self.sct = None
         self._circle_mask = None
+        self._circle_mask_3ch = None
         self._circle_mask_shape = None
+        self._buffer_pool = []
+        self._buffer_idx = 0
+        self._init_buffer_pool()
 
         self.running = True
 
         if self._capture_backend is None:
             raise SystemExit(1)
         self._setup_backend()
+
+    def _init_buffer_pool(self):
+        w = int(cfg.detection_window_width)
+        h = int(cfg.detection_window_height)
+        # Triple-buffering pool to decouple Capture, YOLO Inference, and Visuals
+        self._buffer_pool = [
+            np.empty((h, w, 3), dtype=np.uint8),
+            np.empty((h, w, 3), dtype=np.uint8),
+            np.empty((h, w, 3), dtype=np.uint8),
+        ]
+        self._buffer_idx = 0
+        self._circle_mask_shape = (h, w)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.ellipse(mask, (w // 2, h // 2), (w // 2, h // 2), 0, 0, 360, 255, -1)
+        self._circle_mask = mask
+        self._circle_mask_3ch = cv2.merge([mask, mask, mask])
+
+    def _get_next_buffer(self):
+        w = int(cfg.detection_window_width)
+        h = int(cfg.detection_window_height)
+        if not hasattr(self, '_buffer_pool') or not self._buffer_pool or self._buffer_pool[0].shape[:2] != (h, w):
+            self._init_buffer_pool()
+        buf = self._buffer_pool[self._buffer_idx]
+        self._buffer_idx = (self._buffer_idx + 1) % len(self._buffer_pool)
+        return buf
 
     def _selected_backend(self):
         enabled = []
@@ -157,15 +186,29 @@ class Capture(threading.Thread):
                 bc = None
 
             if self._capture_backend == "obs" and self.obs_camera is not None:
-                ret_val, img = self.obs_camera.read()
-                return img if ret_val else None
+                target_buf = self._get_next_buffer()
+                ret_val = self.obs_camera.read(image=target_buf)
+                if ret_val:
+                    return target_buf
+                return None
 
             if self._capture_backend == "mss" and self.monitor is not None:
                 if self.sct is None:
                     self.sct = mss.mss()
-                screenshot = self.sct.grab(self.monitor)
-                img = np.frombuffer(screenshot.bgra, np.uint8).reshape((screenshot.height, screenshot.width, 4))
-                return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                try:
+                    screenshot = self.sct.grab(self.monitor)
+                    img = np.frombuffer(screenshot.bgra, np.uint8).reshape((screenshot.height, screenshot.width, 4))
+                    target_buf = self._get_next_buffer()
+                    return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR, dst=target_buf)
+                except Exception as e:
+                    if self.running:
+                        try:
+                            self.sct.close()
+                        except Exception:
+                            pass
+                        self.sct = None
+                    time.sleep(0.02)
+                    return None
 
         if bc is not None:
             try:
@@ -188,16 +231,24 @@ class Capture(threading.Thread):
 
     def _sleep_until_next_frame(self, next_frame_at):
         next_frame_at += self._frame_interval
-        sleep_for = next_frame_at - time.perf_counter()
-        if sleep_for > 0:
+        now = time.perf_counter()
+        sleep_for = next_frame_at - now
+        if sleep_for > 0.0015:
             time.sleep(sleep_for)
-        else:
-            next_frame_at = time.perf_counter()
+        elif sleep_for < -0.05:
+            next_frame_at = now
         return next_frame_at
 
     def get_new_frame(self):
         try:
-            return self.frame_queue.get(timeout=1)
+            # Drain any backlog so inference ALWAYS receives the latest, freshest frame
+            frame = self.frame_queue.get(timeout=0.5)
+            while not self.frame_queue.empty():
+                try:
+                    frame = self.frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            return frame
         except queue.Empty:
             return None
     
@@ -220,6 +271,7 @@ class Capture(threading.Thread):
             self._frame_interval = self._calculate_frame_interval()
             self.screen_x_center = int(cfg.detection_window_width / 2)
             self.screen_y_center = int(cfg.detection_window_height / 2)
+            self._init_buffer_pool()
 
             logger.info('[Capture] Capture reloaded')
 
@@ -317,17 +369,20 @@ Hotkeys:
 [{cfg.hotkey_exit}] - EXIT
 [{cfg.hotkey_pause}] - PAUSE AIM
 [{cfg.hotkey_reload_config}] - Reload config
+[F5] - Switch to AK-12 Profile (Recoil Control: 84)
+[F6] - Switch to Standard Profile
 """)
     
     def convert_to_circle(self, image):
         height, width = image.shape[:2]
         shape = (height, width)
-        if self._circle_mask is None or self._circle_mask_shape != shape:
+        if self._circle_mask_3ch is None or self._circle_mask_shape != shape:
             mask = np.zeros(shape, dtype=np.uint8)
             cv2.ellipse(mask, (width // 2, height // 2), (width // 2, height // 2), 0, 0, 360, 255, -1)
             self._circle_mask = mask
+            self._circle_mask_3ch = cv2.merge([mask, mask, mask])
             self._circle_mask_shape = shape
-        return cv2.bitwise_and(image, image, mask=self._circle_mask)
+        return cv2.bitwise_and(image, self._circle_mask_3ch, dst=image)
     
     def Quit(self):
         self.running = False

@@ -58,12 +58,25 @@ class Config:
                 "mouse_auto_aim": "false",
                 "mouse_ghub": "false",
                 "mouse_rzr": "false",
+                "mouse_use_pid": "true",
+                "mouse_pid_kp": "0.80",
+                "mouse_pid_ki": "0.005",
+                "mouse_pid_kd": "0.001",
+                "mouse_pid_max_integral": "30.0",
+                "mouse_deadzone": "1.5",
+                "mouse_max_step": "65",
             },
             "Shooting": {
                 "auto_shoot": "false",
                 "triggerbot": "false",
                 "force_click": "false",
                 "bScope_multiplier": "1.0",
+            },
+            "Recoil": {
+                "recoil_compensation": "true",
+                "recoil_pitch": "3.5",
+                "recoil_spray_scale": "0.8",
+                "recoil_max_pitch": "8.0",
             },
             "Arduino": {
                 "arduino_move": "false",
@@ -264,6 +277,13 @@ class Config:
         self.mouse_auto_aim = self._ensure_and_get(s, "mouse_auto_aim", False, self._to_bool)
         self.mouse_ghub = self._ensure_and_get(s, "mouse_ghub", False, self._to_bool)
         self.mouse_rzr = self._ensure_and_get(s, "mouse_rzr", False, self._to_bool)
+        self.mouse_use_pid = self._ensure_and_get(s, "mouse_use_pid", True, self._to_bool)
+        self.mouse_pid_kp = self._ensure_and_get(s, "mouse_pid_kp", 0.38, float)
+        self.mouse_pid_ki = self._ensure_and_get(s, "mouse_pid_ki", 0.02, float)
+        self.mouse_pid_kd = self._ensure_and_get(s, "mouse_pid_kd", 0.0015, float)
+        self.mouse_pid_max_integral = self._ensure_and_get(s, "mouse_pid_max_integral", 50.0, float)
+        self.mouse_deadzone = self._ensure_and_get(s, "mouse_deadzone", 1.5, float)
+        self.mouse_max_step = self._ensure_and_get(s, "mouse_max_step", 30, int)
 
         # Shooting
         s = "Shooting"
@@ -271,6 +291,13 @@ class Config:
         self.triggerbot = self._ensure_and_get(s, "triggerbot", False, self._to_bool)
         self.force_click = self._ensure_and_get(s, "force_click", False, self._to_bool)
         self.bScope_multiplier = self._ensure_and_get(s, "bScope_multiplier", 1.0, float)
+
+        # Recoil
+        s = "Recoil"
+        self.recoil_compensation = self._ensure_and_get(s, "recoil_compensation", True, self._to_bool)
+        self.recoil_pitch = self._ensure_and_get(s, "recoil_pitch", 2.0, float)
+        self.recoil_spray_scale = self._ensure_and_get(s, "recoil_spray_scale", 0.5, float)
+        self.recoil_max_pitch = self._ensure_and_get(s, "recoil_max_pitch", 6.0, float)
 
         # Arduino
         s = "Arduino"

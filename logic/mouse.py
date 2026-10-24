@@ -15,6 +15,72 @@ if cfg.mouse_rzr:
 if cfg.arduino_move or cfg.arduino_shoot:
     from logic.arduino import arduino
 
+class PIDController:
+    """
+    Precision Adaptive Tracking Controller with EMA Smoothing.
+    Features:
+    - Pure Proportional tracking with critically damped Exponential Moving Average.
+    - Zero integral windup (prevents swinging / limit cycle oscillation).
+    - Zero derivative noise amplification (prevents visual chatter).
+    - Sub-pixel remainder accumulator to prevent quantization deadzones.
+    """
+    def __init__(self, kp: float = 0.80, ki: float = 0.0, kd: float = 0.0, max_integral: float = 30.0):
+        self.kp = float(kp)
+        self.ki = float(ki)
+        self.kd = float(kd)
+        self.max_integral = float(max_integral)
+        self.integral = 0.0
+        self.prev_error = 0.0
+        self.prev_time = None
+        self.remainder = 0.0
+        self.smooth_output = 0.0
+
+    def update(self, error: float, current_time: float = None) -> float:
+        if current_time is None:
+            current_time = time.time()
+
+        if self.prev_time is None or (current_time - self.prev_time) > 0.2:
+            dt = 0.016
+            derivative = 0.0
+            self.smooth_output = 0.0
+        else:
+            dt = max(current_time - self.prev_time, 0.001)
+            derivative = (error - self.prev_error) / dt
+
+        if self.ki > 0:
+            self.integral = max(-self.max_integral, min(self.max_integral, self.integral + error * dt))
+        else:
+            self.integral = 0.0
+
+        raw_output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+
+        # Critically damped smoothing: loại bỏ triệt để rung lắc do jitter AI, bám dính êm ru vào zombie di chuyển
+        alpha = 0.65
+        self.smooth_output = alpha * raw_output + (1.0 - alpha) * self.smooth_output
+
+        self.prev_error = error
+        self.prev_time = current_time
+
+        total = self.smooth_output + self.remainder
+        step = int(total)
+        self.remainder = total - step
+
+        return float(step)
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_error = 0.0
+        self.prev_time = None
+        self.remainder = 0.0
+        self.smooth_output = 0.0
+
+    def update_constants(self, kp: float, ki: float, kd: float, max_integral: float = 50.0):
+        self.kp = float(kp)
+        self.ki = float(ki)
+        self.kd = float(kd)
+        self.max_integral = float(max_integral)
+
+
 class MouseThread:
     def __init__(self):
         self.initialize_parameters()
@@ -45,6 +111,16 @@ class MouseThread:
         self.section_size_x = self.screen_width / 100
         self.section_size_y = self.screen_height / 100
         self._warned_input_unavailable = False
+        self.spray_time = 0.0
+        self.last_shot_time = None
+
+        if not hasattr(self, 'pid_x'):
+            self.pid_x = PIDController(cfg.mouse_pid_kp, cfg.mouse_pid_ki, cfg.mouse_pid_kd, cfg.mouse_pid_max_integral)
+            self.pid_y = PIDController(cfg.mouse_pid_kp, cfg.mouse_pid_ki, cfg.mouse_pid_kd, cfg.mouse_pid_max_integral)
+        else:
+            self.pid_x.update_constants(cfg.mouse_pid_kp, cfg.mouse_pid_ki, cfg.mouse_pid_kd, cfg.mouse_pid_max_integral)
+            self.pid_y.update_constants(cfg.mouse_pid_kp, cfg.mouse_pid_ki, cfg.mouse_pid_kd, cfg.mouse_pid_max_integral)
+            self.reset_pid()
 
     def get_arch(self):
         if cfg.AI_enable_AMD:
@@ -78,21 +154,38 @@ class MouseThread:
             target_w = xyxy[2] - xyxy[0]
             target_h = xyxy[3] - xyxy[1]
             target_cls = data.class_id[0] if data.class_id is not None and data.class_id.size > 0 else None
+            vel_x = 0.0
+            vel_y = 0.0
+        elif len(data) >= 7:
+            target_x, target_y, target_w, target_h, target_cls, vel_x, vel_y = data[:7]
         else:
             target_x, target_y, target_w, target_h, target_cls = data
+            vel_x = 0.0
+            vel_y = 0.0
 
-        shooting_state = self.get_shooting_key_state()
+        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
+        shooting_state = self.get_shooting_key_state() or is_firing
+        if not (shooting_state or cfg.mouse_auto_aim):
+            self.reset_pid()
         self.visualize_target(target_x, target_y, target_cls)
         self.bScope = self.check_target_in_scope(target_x, target_y, target_w, target_h, self.bScope_multiplier) if cfg.auto_shoot or cfg.triggerbot else False
         self.bScope = cfg.force_click or self.bScope
 
+        # Dynamic Latency Lead Compensation:
+        # Bù độ trễ hệ thống (capture + YOLO + mouse = ~25ms).
+        # Khi zombie di chuyển ngang, bù đúng 25ms forward vector giúp tâm súng bám dính chặt chẽ
+        # vào đầu/cổ y hệt như video 2 ("Lunar V2 Neural Network AI POV") mà không bị trễ vài pixel phía sau.
+        lead_time = 0.025
+        effective_x = target_x + (vel_x * lead_time)
+        effective_y = target_y + (vel_y * lead_time)
+
         if not self.disable_prediction:
             current_time = time.time()
             if not isinstance(data, sv.Detections):
-                target_x, target_y = self.predict_target_position(target_x, target_y, current_time)
-            self.visualize_prediction(target_x, target_y, target_cls)
+                effective_x, effective_y = self.predict_target_position(effective_x, effective_y, current_time)
+            self.visualize_prediction(effective_x, effective_y, target_cls)
 
-        move_x, move_y = self.calc_movement(target_x, target_y, target_cls)
+        move_x, move_y = self.calc_movement(effective_x, effective_y, target_cls, shooting_state, target_w, target_h)
 
         self.visualize_history(target_x, target_y)
         shooting.submit(self.bScope, shooting_state)
@@ -115,6 +208,7 @@ class MouseThread:
             self.prev_velocity_x = 0
             self.prev_velocity_y = 0
             self.prev_time = current_time
+            self.reset_pid()
             return target_x, target_y
 
         delta_time = current_time - self.prev_time
@@ -133,8 +227,12 @@ class MouseThread:
 
         speed_correction = 1 + (abs(current_distance - (self.prev_distance or 0)) / self.max_distance) * self.speed_correction_factor if self.prev_distance is not None else 1.0
 
-        predicted_x = target_x + velocity_x * prediction_interval * proximity_factor * speed_correction + 0.5 * acceleration_x * (prediction_interval ** 2) * proximity_factor * speed_correction
-        predicted_y = target_y + velocity_y * prediction_interval * proximity_factor * speed_correction + 0.5 * acceleration_y * (prediction_interval ** 2) * proximity_factor * speed_correction
+        # Safety displacement clamp: dự đoán không được vượt quá 12px để tránh hiện tượng vung chuột nhảy sang con thứ 2
+        pred_offset_x = max(-12.0, min(12.0, velocity_x * prediction_interval * proximity_factor * speed_correction + 0.5 * acceleration_x * (prediction_interval ** 2) * proximity_factor * speed_correction))
+        pred_offset_y = max(-12.0, min(12.0, velocity_y * prediction_interval * proximity_factor * speed_correction + 0.5 * acceleration_y * (prediction_interval ** 2) * proximity_factor * speed_correction))
+
+        predicted_x = target_x + pred_offset_x
+        predicted_y = target_y + pred_offset_y
 
         self.prev_x, self.prev_y = target_x, target_y
         self.prev_velocity_x, self.prev_velocity_y = velocity_x, velocity_y
@@ -172,41 +270,113 @@ class MouseThread:
 
         return speed_multiplier
 
-    def calc_movement(self, target_x, target_y, target_cls):
+    def _update_spray_state(self) -> bool:
+        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
+        now = time.time()
+        if is_firing:
+            if self.last_shot_time is None or (now - self.last_shot_time) > 0.25:
+                self.spray_time = 0.0
+            else:
+                self.spray_time += (now - self.last_shot_time)
+            self.last_shot_time = now
+        else:
+            self.last_shot_time = None
+            self.spray_time = 0.0
+        return is_firing
+
+    def calc_movement(self, target_x, target_y, target_cls, shooting_state=False, target_w=0.0, target_h=0.0):
+        is_firing = self._update_spray_state()
+
+        # Dynamic Spray Recoil Control:
+        # Tịnh tiến êm dịu điểm ngắm từ giữa đầu xuống hõm ngực/cổ để cụm đạn găm trúng đầu
+        spray_drop = 0.0
+        if is_firing and target_h > 0:
+            spray_progress = min(1.0, max(0.0, (self.spray_time - 0.05) / 0.25))
+            max_drop = min(target_h * 0.45, cfg.recoil_pitch * 1.5)
+            spray_drop = spray_progress * max_drop
+
+        effective_target_y = target_y + spray_drop
+
         offset_x = target_x - self.center_x
-        offset_y = target_y - self.center_y
-        distance = math.sqrt(offset_x**2 + offset_y**2)
-        speed_multiplier = self.calculate_speed_multiplier(target_x, target_y, distance)
+        offset_y = effective_target_y - self.center_y
+        distance = math.hypot(offset_x, offset_y)
+
+        # Smooth deadzone:
+        if distance < cfg.mouse_deadzone:
+            return 0.0, 0.0
+
+        smooth_factor = min(1.0, max(0.40, distance / 3.0)) if distance < 3.0 else 1.0
 
         degrees_per_pixel_x = self.fov_x / self.screen_width
         degrees_per_pixel_y = self.fov_y / self.screen_height
-
-        mouse_move_x = offset_x * degrees_per_pixel_x
-        mouse_move_y = offset_y * degrees_per_pixel_y
-
-        # Apply smoothing
-        alpha = 0.85
-        if not hasattr(self, 'last_move_x'):
-            self.last_move_x, self.last_move_y = 0, 0
-
-        move_x = alpha * mouse_move_x + (1 - alpha) * self.last_move_x
-        move_y = alpha * mouse_move_y + (1 - alpha) * self.last_move_y
-
-        self.last_move_x, self.last_move_y = move_x, move_y
-
         sensitivity = max(self.mouse_sensitivity, 1e-6)
-        move_x = (move_x / 360) * (self.dpi * (1 / sensitivity)) * speed_multiplier
-        move_y = (move_y / 360) * (self.dpi * (1 / sensitivity)) * speed_multiplier
+
+        scale_x = (degrees_per_pixel_x / 360.0) * (self.dpi / sensitivity)
+        scale_y = (degrees_per_pixel_y / 360.0) * (self.dpi / sensitivity)
+
+        raw_move_x = offset_x * scale_x
+        raw_move_y = offset_y * scale_y
+
+        now = time.time()
+        move_x = self.pid_x.update(raw_move_x * smooth_factor, current_time=now)
+        move_y = self.pid_y.update(raw_move_y * smooth_factor, current_time=now)
+
+        # Trợ lực ghìm tâm tuyến tính khi xả súng:
+        if cfg.recoil_compensation and is_firing:
+            spray_progress = min(1.0, max(0.0, (self.spray_time - 0.04) / 0.25))
+            direct_pull = spray_progress * cfg.recoil_pitch * 0.8
+            direct_pull = min(direct_pull, cfg.recoil_max_pitch)
+            move_y += direct_pull * (scale_y / 1.5)
 
         return move_x, move_y
+
+    def get_recoil_offset(self, shooting_state=False):
+        # Used for standalone recoil pull-down when spraying freely into open space
+        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
+        if is_firing:
+            recoil_y = min(
+                cfg.recoil_pitch * (1.0 + self.spray_time * cfg.recoil_spray_scale),
+                cfg.recoil_max_pitch
+            )
+            return recoil_y
+        return 0.0
+
+    def apply_standalone_recoil(self):
+        """Applies recoil pull-down when player sprays freely without locking on a target."""
+        if not cfg.recoil_compensation:
+            return
+        recoil_y = self.get_recoil_offset()
+        if recoil_y > 0:
+            self.move_mouse(0, int(recoil_y), True)
+
+    def reset_pid(self):
+        if hasattr(self, 'pid_x'):
+            self.pid_x.reset()
+        if hasattr(self, 'pid_y'):
+            self.pid_y.reset()
+        if hasattr(self, 'last_move_x'):
+            self.last_move_x = 0.0
+            self.last_move_y = 0.0
+        if hasattr(self, 'remainder_x'):
+            self.remainder_x = 0.0
+            self.remainder_y = 0.0
+        self.spray_time = 0.0
+        self.last_shot_time = None
 
     def move_mouse(self, x, y, shooting_state):
         move_x = int(x)
         move_y = int(y)
+
+        # Max step safety clamp: giới hạn tối đa 35px/khung hình để loại bỏ hoàn toàn giật văng chuột
+        max_step = min(cfg.mouse_max_step, 35) if cfg.mouse_max_step > 0 else 35
+        move_x = max(-max_step, min(max_step, move_x))
+        move_y = max(-max_step, min(max_step, move_y))
+
         if move_x == 0 and move_y == 0:
             return
 
-        if shooting_state or cfg.mouse_auto_aim:
+        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
+        if shooting_state or cfg.mouse_auto_aim or (cfg.recoil_compensation and is_firing):
             if not cfg.mouse_ghub and not cfg.arduino_move and not cfg.mouse_rzr:
                 if not input_backend.move_mouse(move_x, move_y):
                     if not self._warned_input_unavailable:
@@ -256,6 +426,10 @@ class MouseThread:
         self.arch = self.get_arch()
         self.prev_time = None
         self.prev_distance = None
+        if hasattr(self, 'pid_x'):
+            self.pid_x.update_constants(cfg.mouse_pid_kp, cfg.mouse_pid_ki, cfg.mouse_pid_kd, cfg.mouse_pid_max_integral)
+            self.pid_y.update_constants(cfg.mouse_pid_kp, cfg.mouse_pid_ki, cfg.mouse_pid_kd, cfg.mouse_pid_max_integral)
+            self.reset_pid()
         self.setup_hardware()
 
     def visualize_target(self, target_x, target_y, target_cls):
