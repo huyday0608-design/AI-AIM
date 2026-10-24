@@ -371,6 +371,7 @@ Hotkeys:
 [{cfg.hotkey_reload_config}] - Reload config
 [F5] - Switch to AK-12 Profile (Recoil Control: 84)
 [F6] - Switch to Standard Profile
+[F7] - Switch to Sniper Mode (100% Headshot One-Tap)
 """)
     
     def convert_to_circle(self, image):

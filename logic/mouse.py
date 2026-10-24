@@ -180,12 +180,13 @@ class MouseThread:
         effective_y = target_y + (vel_y * lead_time)
 
         # Lunar V2 Feature 2: Multi-Point Dynamic Hit Surface Optimization
-        # Khi zombie di chuyển nhanh (|vel_x| > 60 px/s), tự động tịnh tiến vi mô điểm ngắm từ đỉnh đầu
-        # xuống hõm cổ/ngực trên để cụm đạn găm trọn vào hitbox, tránh bắn sượt tai khi zombie chạy.
-        if abs(vel_x) > 60.0 and target_h > 0:
-            strafe_intensity = min(1.0, (abs(vel_x) - 60.0) / 140.0)
-            strafe_y_drop = strafe_intensity * (target_h * 0.12)
-            effective_y += strafe_y_drop
+        # Khi ở chế độ súng ngắm (Sniper Mode): Khóa chết 100% vào hộp sọ / mắt (Pinpoint Headshot Lock).
+        # Tuyệt đối KHÔNG hạ điểm ngắm xuống ngực hay cổ kể cả khi zombie chạy nhanh, đảm bảo 1-hit kill!
+        if not getattr(cfg, 'weapon_is_sniper', False):
+            if abs(vel_x) > 60.0 and target_h > 0:
+                strafe_intensity = min(1.0, (abs(vel_x) - 60.0) / 140.0)
+                strafe_y_drop = strafe_intensity * (target_h * 0.12)
+                effective_y += strafe_y_drop
 
         if not self.disable_prediction:
             current_time = time.time()
@@ -294,14 +295,13 @@ class MouseThread:
 
     def calc_movement(self, target_x, target_y, target_cls, shooting_state=False, target_w=0.0, target_h=0.0):
         is_firing = self._update_spray_state()
+        is_sniper = getattr(cfg, 'weapon_is_sniper', False)
 
         # Reverse.AI / Delta Force Progressive Spray Model:
         # Đường cong ghìm súng 3 pha chuẩn xác cho súng tự động:
-        # - Pha 1 (0.0s - 0.16s, 1-3 viên đầu): Giật nhẹ, ghìm êm để đạn găm ngay sọ.
-        # - Pha 2 (0.16s - 0.55s, viên 4-10): Độ nảy súng tăng mạnh, ghìm lũy tiến theo đường cong mượt.
-        # - Pha 3 (>= 0.55s, xả đạn dài): Ổn định tại trần recoil, tự động bù độ tản mát (bloom cone).
+        # (Chế độ súng ngắm bắn từng phát 1-tap: spray_drop = 0 để giữ tâm chính xác 100% trên đầu)
         spray_drop = 0.0
-        if is_firing and target_h > 0:
+        if not is_sniper and is_firing and target_h > 0:
             if self.spray_time < 0.16:
                 stage_factor = (self.spray_time / 0.16) * 0.30
             elif self.spray_time < 0.55:
@@ -340,11 +340,13 @@ class MouseThread:
         raw_move_y = offset_y * scale_y
 
         now = time.time()
-        move_x = self.pid_x.update(raw_move_x * smooth_factor, current_time=now)
-        move_y = self.pid_y.update(raw_move_y * smooth_factor, current_time=now)
+        # Súng ngắm tăng tốc độ vẩy tâm (Flick Snap) vào đầu kẻ địch
+        flick_gain = 1.08 if is_sniper else 1.0
+        move_x = self.pid_x.update(raw_move_x * smooth_factor * flick_gain, current_time=now)
+        move_y = self.pid_y.update(raw_move_y * smooth_factor * flick_gain, current_time=now)
 
-        # Trigger-Coupled Drag: Trợ lực ghìm tâm lũy tiến khi xả súng liên thanh
-        if cfg.recoil_compensation and is_firing:
+        # Trigger-Coupled Drag: Trợ lực ghìm tâm lũy tiến khi xả súng liên thanh (không kích hoạt cho súng ngắm)
+        if not is_sniper and cfg.recoil_compensation and is_firing:
             if self.spray_time < 0.16:
                 pull_stage = (self.spray_time / 0.16) * 0.35
             elif self.spray_time < 0.55:
@@ -426,6 +428,15 @@ class MouseThread:
         return False
 
     def check_target_in_scope(self, target_x, target_y, target_w, target_h, reduction_factor):
+        if getattr(cfg, 'weapon_is_sniper', False):
+            # Sniper Triggerbot: Thu hẹp vùng ngắm siêu chuẩn vào đúng hộp sọ (Head Hitbox)
+            # Chỉ kích hoạt bắn khi tâm ngắm đã nằm chính xác trong bán kính đầu
+            head_r = max(6.0, target_h * 0.18 * reduction_factor)
+            bScope = math.hypot(self.center_x - target_x, self.center_y - target_y) <= head_r
+            if cfg.show_window and cfg.show_bScope_box:
+                visuals.draw_bScope(target_x - head_r, target_x + head_r, target_y - head_r, target_y + head_r, bScope)
+            return bScope
+
         reduced_w, reduced_h = target_w * reduction_factor / 2, target_h * reduction_factor / 2
         x1, x2, y1, y2 = target_x - reduced_w, target_x + reduced_w, target_y - reduced_h, target_y + reduced_h
         bScope = self.center_x > x1 and self.center_x < x2 and self.center_y > y1 and self.center_y < y2

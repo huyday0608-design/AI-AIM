@@ -255,18 +255,23 @@ class Visuals(threading.Thread):
                     cv2.circle(self.image, (ilax, ilay), 3, (0, 0, 255), -1, cv2.LINE_AA)
                     cv2.circle(self.image, (ilax, ilay), 6, (0, 255, 255), 1, cv2.LINE_AA)
 
-                    # Bold Electric Blue "LOCKED" indicator badge above the head:
-                    badge_text = "LOCKED"
-                    text_x = max(10, ilax - 32)
+                    # Indicator Badge: Electric Magenta for Sniper Headshot, Cyan for Rifle Lock
+                    is_sniper = getattr(cfg, 'weapon_is_sniper', False)
+                    badge_text = "SNIPER HEAD" if is_sniper else "LOCKED"
+                    text_color = (255, 120, 255) if is_sniper else (255, 200, 20)
+                    text_x = max(10, ilax - (48 if is_sniper else 32))
                     text_y = max(22, by1 - 8)
                     cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.60, (0, 0, 0), 3, cv2.LINE_AA)
-                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.60, (255, 200, 20), 2, cv2.LINE_AA)
+                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.60, text_color, 2, cv2.LINE_AA)
 
                 if cfg.show_overlay:
                     if cfg.overlay_show_boxes:
                         overlay.draw_square(bx1, by1, bx2, by2, 'yellow', 2)
                     overlay.draw_point(ilax, ilay, 'red', 3)
-                    overlay.draw_text(ilax, max(12, by1 - 8), "LOCKED", 11, 'cyan')
+                    is_sniper = getattr(cfg, 'weapon_is_sniper', False)
+                    overlay_badge = "SNIPER HEAD" if is_sniper else "LOCKED"
+                    overlay_color = 'magenta' if is_sniper else 'cyan'
+                    overlay.draw_text(ilax, max(12, by1 - 8), overlay_badge, 11, overlay_color)
                     
             # debug window: resize
             if cfg.show_window:
