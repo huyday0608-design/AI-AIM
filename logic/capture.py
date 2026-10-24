@@ -43,6 +43,8 @@ class Capture(threading.Thread):
         self._buffer_idx = 0
         self._init_buffer_pool()
 
+        self.latest_frame_time = time.perf_counter()
+        self.latest_frame_id = 0
         self.running = True
 
         if self._capture_backend is None:
@@ -220,14 +222,16 @@ class Capture(threading.Thread):
         return None
 
     def _publish_frame(self, frame):
+        capture_time = time.perf_counter()
+        payload = (frame, capture_time)
         try:
-            self.frame_queue.put_nowait(frame)
+            self.frame_queue.put_nowait(payload)
         except queue.Full:
             try:
                 self.frame_queue.get_nowait()
             except queue.Empty:
                 pass
-            self.frame_queue.put_nowait(frame)
+            self.frame_queue.put_nowait(payload)
 
     def _sleep_until_next_frame(self, next_frame_at):
         next_frame_at += self._frame_interval
@@ -242,15 +246,24 @@ class Capture(threading.Thread):
     def get_new_frame(self):
         try:
             # Drain any backlog so inference ALWAYS receives the latest, freshest frame
-            frame = self.frame_queue.get(timeout=0.5)
+            payload = self.frame_queue.get(timeout=0.5)
             while not self.frame_queue.empty():
                 try:
-                    frame = self.frame_queue.get_nowait()
+                    payload = self.frame_queue.get_nowait()
                 except queue.Empty:
                     break
+            if isinstance(payload, tuple):
+                frame, capture_time = payload
+            else:
+                frame, capture_time = payload, time.perf_counter()
+            self.latest_frame_time = capture_time
+            self.latest_frame_id = getattr(self, 'latest_frame_id', 0) + 1
             return frame
         except queue.Empty:
             return None
+
+    def get_frame_age(self):
+        return time.perf_counter() - getattr(self, 'latest_frame_time', time.perf_counter())
     
     def restart(self):
         with self._backend_lock:

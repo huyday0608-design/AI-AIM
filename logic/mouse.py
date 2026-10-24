@@ -44,8 +44,12 @@ class PIDController:
             derivative = 0.0
             self.smooth_output = 0.0
         else:
-            dt = max(current_time - self.prev_time, 0.001)
+            dt = max(0.001, min(0.080, current_time - self.prev_time))
             derivative = (error - self.prev_error) / dt
+
+        # Zero-crossing anti-windup: reset integral when error crosses zero to eliminate overshoot
+        if (error > 0 and self.prev_error < 0) or (error < 0 and self.prev_error > 0):
+            self.integral = 0.0
 
         if self.ki > 0:
             self.integral = max(-self.max_integral, min(self.max_integral, self.integral + error * dt))
@@ -293,6 +297,14 @@ class MouseThread:
         return is_firing
 
     def calc_movement(self, target_x, target_y, target_cls, shooting_state=False, target_w=0.0, target_h=0.0):
+        # Coordinate sanity & boundary validation
+        if not (isinstance(target_x, (int, float)) and isinstance(target_y, (int, float))):
+            return 0.0, 0.0
+        if not (math.isfinite(target_x) and math.isfinite(target_y)):
+            return 0.0, 0.0
+        if target_x < 0 or target_x > self.screen_width or target_y < 0 or target_y > self.screen_height:
+            return 0.0, 0.0
+
         is_firing = self._update_spray_state()
         is_sniper = getattr(cfg, 'weapon_is_sniper', False)
 
@@ -395,6 +407,19 @@ class MouseThread:
         self.last_shot_time = None
 
     def move_mouse(self, x, y, shooting_state):
+        # Emergency pause guard: when paused, do not send any movement!
+        try:
+            from logic.hotkeys_watcher import hotkeys_watcher
+            if hotkeys_watcher.app_pause != 0:
+                self.reset_pid()
+                return
+        except Exception:
+            pass
+
+        # Dry-run simulation mode: do not send mouse events, safe for offline benchmarking
+        if getattr(cfg, 'mouse_dry_run', False):
+            return
+
         move_x = int(x)
         move_y = int(y)
 
@@ -403,11 +428,27 @@ class MouseThread:
         move_x = max(-max_step, min(max_step, move_x))
         move_y = max(-max_step, min(max_step, move_y))
 
+        # Slew-rate limiter / max acceleration safety clamp:
+        # Prevents violent mouse twitching between consecutive frames
+        if hasattr(self, 'last_sent_move_x') and hasattr(self, 'last_sent_move_y'):
+            max_accel = 16
+            move_x = max(self.last_sent_move_x - max_accel, min(self.last_sent_move_x + max_accel, move_x))
+            move_y = max(self.last_sent_move_y - max_accel, min(self.last_sent_move_y + max_accel, move_y))
+        self.last_sent_move_x = move_x
+        self.last_sent_move_y = move_y
+
+        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
+        active_aiming = shooting_state or cfg.mouse_auto_aim
+
+        # Horizontal tracking requires active aiming intent.
+        # Merely firing left click does NOT jerk crosshair horizontally!
+        if not active_aiming:
+            move_x = 0
+
         if move_x == 0 and move_y == 0:
             return
 
-        is_firing = shooting.button_pressed or input_backend.is_pressed("LeftMouseButton")
-        if shooting_state or cfg.mouse_auto_aim or (cfg.recoil_compensation and is_firing):
+        if active_aiming or (cfg.recoil_compensation and is_firing):
             if not cfg.mouse_ghub and not cfg.arduino_move and not cfg.mouse_rzr:
                 if not input_backend.move_mouse(move_x, move_y):
                     if not self._warned_input_unavailable:

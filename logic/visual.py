@@ -241,11 +241,15 @@ class Visuals(threading.Thread):
 
             # Locked Target Visual Indicator (As observed in Video 2 - Lunar V2 Neural Network AI POV):
             if draw_locked_target_data is not None:
-                if len(draw_locked_target_data) >= 6:
-                    lbx, lby, lbw, lbh, lax, lay = draw_locked_target_data
+                status = "TRACKING"
+                if len(draw_locked_target_data) >= 7:
+                    lbx, lby, lbw, lbh, lax, lay, status = draw_locked_target_data
+                elif len(draw_locked_target_data) >= 6:
+                    lbx, lby, lbw, lbh, lax, lay = draw_locked_target_data[:6]
                 else:
-                    lax, lay, lbw, lbh = draw_locked_target_data
+                    lax, lay, lbw, lbh = draw_locked_target_data[:4]
                     lbx, lby = lax, lay
+
                 ilbx, ilby = int(lbx), int(lby)
                 ilax, ilay = int(lax), int(lay)
                 half_w, half_h = int(lbw / 2), int(lbh / 2)
@@ -253,21 +257,26 @@ class Visuals(threading.Thread):
                 bx2, by2 = min(cfg.detection_window_width, ilbx + half_w), min(cfg.detection_window_height, ilby + half_h)
 
                 if cfg.show_window:
-                    # Target Lock Bounding Box in vibrant gold centered on actual body:
-                    cv2.rectangle(self.image, (bx1, by1), (bx2, by2), (0, 215, 255), 2)
+                    box_color = (0, 165, 255) if status == "TEMPORARY_LOST" else (0, 215, 255)
+                    # Target Lock Bounding Box centered on actual body:
+                    cv2.rectangle(self.image, (bx1, by1), (bx2, by2), box_color, 2)
 
-                    # Red dot aimpoint directly on target center/head (y hệt video 2):
+                    # Red dot aimpoint directly on target center/head:
                     cv2.circle(self.image, (ilax, ilay), 3, (0, 0, 255), -1, cv2.LINE_AA)
                     cv2.circle(self.image, (ilax, ilay), 6, (0, 255, 255), 1, cv2.LINE_AA)
 
-                    # Indicator Badge: Electric Magenta for Sniper Headshot, Cyan for Rifle Lock
                     is_sniper = getattr(cfg, 'weapon_is_sniper', False)
-                    badge_text = "SNIPER HEAD" if is_sniper else "LOCKED"
-                    text_color = (255, 120, 255) if is_sniper else (255, 200, 20)
+                    if status == "TEMPORARY_LOST":
+                        badge_text = "HOLD [OCCLUDED]"
+                        text_color = (0, 165, 255)
+                    else:
+                        badge_text = "SNIPER HEAD" if is_sniper else "LOCKED"
+                        text_color = (255, 120, 255) if is_sniper else (255, 200, 20)
+
                     text_x = max(10, ilax - (48 if is_sniper else 32))
                     text_y = max(22, by1 - 8)
-                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.60, (0, 0, 0), 3, cv2.LINE_AA)
-                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.60, text_color, 2, cv2.LINE_AA)
+                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.putText(self.image, badge_text, (text_x, text_y), cv2.FONT_HERSHEY_DUPLEX, 0.55, text_color, 2, cv2.LINE_AA)
 
                 if cfg.show_overlay:
                     if cfg.overlay_show_boxes:
@@ -345,11 +354,11 @@ class Visuals(threading.Thread):
             if len(self.draw_history_point_data) > 30:
                 self.draw_history_point_data.pop(0)
         
-    def draw_locked_target(self, box_x, box_y, box_w, box_h, aim_x=None, aim_y=None):
+    def draw_locked_target(self, box_x, box_y, box_w, box_h, aim_x=None, aim_y=None, status="TRACKING"):
         with self.data_lock:
             ax = float(box_x) if aim_x is None else float(aim_x)
             ay = float(box_y) if aim_y is None else float(aim_y)
-            self.draw_locked_target_data = (float(box_x), float(box_y), float(box_w), float(box_h), ax, ay)
+            self.draw_locked_target_data = (float(box_x), float(box_y), float(box_w), float(box_h), ax, ay, str(status))
 
     def clear_locked_target(self):
         with self.data_lock:

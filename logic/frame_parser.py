@@ -14,6 +14,13 @@ from logic.platform import input_backend
 from logic.model_classes import HEAD_CLASS_ID, is_head_class
 
 
+class TrackingState:
+    SEARCHING = "SEARCHING"
+    TRACKING = "TRACKING"
+    TEMPORARY_LOST = "TEMPORARY_LOST"
+    LOST = "LOST"
+
+
 class Target:
     def __init__(self, x, y, w, h, cls, track_id=None, aim_x=None, aim_y=None, vel_x=0.0, vel_y=0.0):
         self.cls = int(cls)
@@ -142,6 +149,7 @@ class FrameParser:
         self.locked_cls = None
         self.lock_timeout = 0.45  # 450ms grace period trước khi xác nhận mục tiêu chết hẳn
         self.flash_holdover = 0.30  # 300ms bridge for muzzle flash / shake / frame loss
+        self.tracking_state = TrackingState.SEARCHING
 
     def parse(self, result):
         if result is None:
@@ -190,7 +198,8 @@ class FrameParser:
                     visuals.draw_locked_target(
                         self.locked_track.box_x, self.locked_track.box_y,
                         self.locked_track.box_w, self.locked_track.box_h,
-                        self.locked_track.aim_x, self.locked_track.aim_y
+                        self.locked_track.aim_x, self.locked_track.aim_y,
+                        status=self.tracking_state
                     )
 
     def _visualize_frame(self, frame):
@@ -211,22 +220,45 @@ class FrameParser:
 
         # Reset lock if no targets seen within the active timeout period
         active_timeout = 0.40 if is_firing else self.lock_timeout
-        if self.locked_track is not None and (now - self.locked_track.last_time > active_timeout):
-            self.locked_track = None
-            self.locked_pos = None
-            self.locked_track_id = None
-            self.locked_cls = None
-            visuals.clear_locked_target()
+        if self.locked_track is not None:
+            if (now - self.locked_track.last_time <= active_timeout):
+                # Target is temporarily occluded (muzzle flash / smoke):
+                # Maintain locked target visual indicator so UI doesn't blink!
+                self.tracking_state = TrackingState.TEMPORARY_LOST
+                visuals.draw_locked_target(
+                    self.locked_track.box_x, self.locked_track.box_y,
+                    self.locked_track.box_w, self.locked_track.box_h,
+                    self.locked_track.aim_x, self.locked_track.aim_y,
+                    status=TrackingState.TEMPORARY_LOST
+                )
+            else:
+                self.tracking_state = TrackingState.LOST
+                self.locked_track = None
+                self.locked_pos = None
+                self.locked_track_id = None
+                self.locked_cls = None
+                visuals.clear_locked_target()
+                if cfg.show_window or cfg.show_overlay:
+                    visuals.clear()
+        else:
+            self.tracking_state = TrackingState.SEARCHING
+            if cfg.show_window or cfg.show_overlay:
+                visuals.clear()
 
         if cfg.recoil_compensation and is_firing:
             mouse.apply_standalone_recoil()
-        if cfg.show_window or cfg.show_overlay:
-            visuals.clear()
         if cfg.auto_shoot or cfg.triggerbot:
             shooting.shoot(False, False)
 
     def sort_targets(self, frame):
         tracker_ids = None
+        if hasattr(frame, "orig_shape"):
+            self._current_frame_shape = frame.orig_shape
+        elif hasattr(frame, "boxes") and hasattr(frame.boxes, "orig_shape"):
+            self._current_frame_shape = frame.boxes.orig_shape
+        else:
+            self._current_frame_shape = (cfg.detection_window_height, cfg.detection_window_width)
+
         if isinstance(frame, sv.Detections):
             boxes_array, classes_tensor = self._convert_sv_to_tensor(frame)
             tracker_ids = getattr(frame, "tracker_id", None)
@@ -270,7 +302,7 @@ class FrameParser:
             self.last_aim_time = now
         else:
             # Tap-fire grace period: Nhấp nhả chuột không làm mất khóa mục tiêu
-            if (now - self.last_aim_time) > 0.40:
+            if (now - self.last_aim_time) > 0.40 and not (cfg.show_window or cfg.show_overlay):
                 self.locked_track = None
                 self.locked_pos = None
                 self.locked_track_id = None
@@ -309,8 +341,12 @@ class FrameParser:
         targets = []
 
         # 1. Match heads to bodies to form complete physical targets with headshot aimpoints
-        win_w = float(cfg.detection_window_width)
-        win_h = float(cfg.detection_window_height)
+        if hasattr(self, '_current_frame_shape') and self._current_frame_shape:
+            win_h, win_w = float(self._current_frame_shape[0]), float(self._current_frame_shape[1])
+        else:
+            win_w = float(cfg.detection_window_width)
+            win_h = float(cfg.detection_window_height)
+
         for b in bodies:
             bx, by, bw, bh = b['box']
             # Reject full-screen wall / texture hallucination glitches (> 85% screen size)
@@ -357,8 +393,6 @@ class FrameParser:
         # 2. Add legitimate unmatched heads (e.g. enemy behind cover with only head visible)
         # Lọc triệt để đồ vật môi trường (ống nước, đèn trần, van xả, mô hình súng/tay của người chơi):
         if not cfg.disable_headshot:
-            win_w = float(cfg.detection_window_width)
-            win_h = float(cfg.detection_window_height)
             for h_idx, h in enumerate(heads):
                 if h_idx not in matched_head_indices:
                     hx, hy, hw, hh = h['box']
@@ -394,7 +428,7 @@ class FrameParser:
 
         # 3. Dedicated Target Lock Commitment & Continuous Motion Tracking:
         selected = None
-        aim_active = is_aiming or (now - self.last_aim_time <= 0.40)
+        aim_active = is_aiming or (now - self.last_aim_time <= 0.40) or (cfg.show_window or cfg.show_overlay)
         has_active_lock = (
             cfg.mouse_lock_target
             and aim_active
@@ -426,23 +460,33 @@ class FrameParser:
             # Khi mục tiêu bị che khuất tạm thời (chớp lửa đạn/khói bụi < lock_timeout):
             # Giữ nguyên khóa mục tiêu hiện tại, KHÔNG nhảy lung tung sang dummy khác!
             if selected is None:
+                self.tracking_state = TrackingState.TEMPORARY_LOST
+                mouse.reset_pid()
+                visuals.draw_locked_target(
+                    self.locked_track.box_x, self.locked_track.box_y,
+                    self.locked_track.box_w, self.locked_track.box_h,
+                    self.locked_track.aim_x, self.locked_track.aim_y,
+                    status=TrackingState.TEMPORARY_LOST
+                )
                 return None
 
         # 4. New Target Selection (Chỉ khi CHƯA có mục tiêu hoặc mục tiêu cũ đã biến mất hẳn > lock_timeout):
         if selected is None and not has_active_lock:
-            cx = capture.screen_x_center
-            cy = capture.screen_y_center
+            cx = win_w / 2.0
+            cy = win_h / 2.0
             selected = min(targets, key=lambda t: math.hypot(t['aim_x'] - cx, t['aim_y'] - cy))
             if selected is not None:
                 self.locked_track = LockedZombieTrack(
                     selected['box_x'], selected['box_y'], selected['box_w'], selected['box_h'],
                     selected['aim_x'], selected['aim_y'], selected['cls'], selected['track_id']
                 )
+                self.tracking_state = TrackingState.TRACKING
         elif selected is not None and self.locked_track is not None:
             self.locked_track.update(
                 selected['box_x'], selected['box_y'], selected['box_w'], selected['box_h'],
                 selected['aim_x'], selected['aim_y'], selected['track_id'], now, selected['cls']
             )
+            self.tracking_state = TrackingState.TRACKING
 
         if self.locked_track is None or selected is None:
             return None

@@ -93,6 +93,10 @@ def init():
     from logic.shooting import shooting
     from logic.mouse import mouse
     from logic.platform import input_backend
+    from logic.hardware_profile import hardware_profile
+
+    profile_mode = getattr(cfg, "hardware_profile_mode", "STABLE")
+    hardware_profile.apply_profile(profile_mode)
 
     tracker = ByteTrackTracker() if not cfg.disable_tracker else None
     
@@ -131,22 +135,24 @@ def init():
             # Player is not in combat (walking, looting, exploring):
             if cfg.show_window or cfg.show_overlay:
                 idle_frame_counter += 1
-                # In preview mode, run inference at a low rate (1 out of 4 frames, ~10 FPS)
-                # to keep preview responsive while saving 75% GPU power!
-                if idle_frame_counter % 4 == 0:
+                # In preview mode, run inference steadily without strobe-clearing visuals:
+                if idle_frame_counter % 2 == 0:
                     result = perform_detection(model, image, tracker)
                     frameParser.parse(result)
-                else:
-                    visuals.clear()
                 visuals.submit_frame(image)
             else:
                 # Production gaming mode (show_window = False):
-                # Skip GPU inference entirely! Sleep 12ms to yield 100% GPU and CPU resources to the game!
-                # The game runs with silky-smooth native 100+ FPS!
-                time.sleep(0.012)
+                # Yield GPU and CPU resources to the game according to hardware profile
+                time.sleep(hardware_profile.idle_sleep_ms / 1000.0)
             continue
 
-        # Active combat: Run at full speed!
+        # Active combat:
+        # Check frame age: discard stale frames older than max_queue_age_ms to prevent latency accumulation
+        frame_age = capture.get_frame_age()
+        if frame_age > (hardware_profile.max_queue_age_ms * 2.5 / 1000.0):
+            # Frame is too stale; skip processing this frame to catch up with real-time
+            continue
+
         idle_frame_counter = 0
         result = perform_detection(model, image, tracker)
         frameParser.parse(result)

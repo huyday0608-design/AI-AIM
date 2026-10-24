@@ -65,6 +65,11 @@ class Config:
                 "mouse_pid_max_integral": "30.0",
                 "mouse_deadzone": "1.5",
                 "mouse_max_step": "65",
+                "mouse_dry_run": "false",
+            },
+            "Hardware Profile": {
+                "profile_mode": "STABLE",
+                "auto_hardware_profile": "true",
             },
             "Shooting": {
                 "auto_shoot": "false",
@@ -284,6 +289,12 @@ class Config:
         self.mouse_pid_max_integral = self._ensure_and_get(s, "mouse_pid_max_integral", 50.0, float)
         self.mouse_deadzone = self._ensure_and_get(s, "mouse_deadzone", 1.5, float)
         self.mouse_max_step = self._ensure_and_get(s, "mouse_max_step", 30, int)
+        self.mouse_dry_run = self._ensure_and_get(s, "mouse_dry_run", False, self._to_bool)
+
+        # Hardware Profile
+        s = "Hardware Profile"
+        self.hardware_profile_mode = self._ensure_and_get(s, "profile_mode", "STABLE", str)
+        self.auto_hardware_profile = self._ensure_and_get(s, "auto_hardware_profile", True, self._to_bool)
 
         # Shooting
         s = "Shooting"
